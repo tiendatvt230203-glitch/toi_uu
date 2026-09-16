@@ -6,10 +6,10 @@
 
 #define MAX_INTERFACES 16
 #define MAC_LEN 6
-#define MAX_PROFILES 32
-#define MAX_PROFILE_INTERFACES 16
-#define MAX_BRIDGES_PER_PROFILE MAX_PROFILE_INTERFACES
+#define NE_PROFILE_SLOTS 1
+#define MAX_BRIDGES_PER_PROFILE MAX_INTERFACES
 #define MAX_CRYPTO_POLICIES 128
+#define PQC_PEER_PUB_MAX 8192
 #define POLICY_PROTO_ANY 0
 #define POLICY_PROTO_TCP_UDP 254
 
@@ -42,32 +42,18 @@ struct crypto_policy {
     uint32_t dst_mask;
 };
 
-struct bridge_pair {
-    int local_idx;
-    int wan_dp;
+struct bridge_config {
     char ifname[IF_NAMESIZE];
+    int local_slot;
+    int wan_slot;
 };
 
-struct profile_config {
-    int id;
-    char name[64];
-    int enabled;
-    int bridge_enable;
-    int bridge_count;
-    struct bridge_pair bridges[MAX_BRIDGES_PER_PROFILE];
-    int local_indices[MAX_PROFILE_INTERFACES];
-    int local_count;
-    int wan_indices[MAX_PROFILE_INTERFACES];
-    int wan_bandwidth_weight[MAX_PROFILE_INTERFACES];
-    int wan_count;
-    int policy_indices[MAX_CRYPTO_POLICIES];
-    int policy_count;
+struct pqc_profile_config {
     char local_identity_fingerprint[16];
     char peer_fingerprint[16];
-    int pqc_is_initiator;
+    int is_initiator;
     int has_pqc_identity;
-#define PQC_PEER_PUB_MAX 8192
-    char pqc_peer_pub[PQC_PEER_PUB_MAX];
+    char peer_public_key[PQC_PEER_PUB_MAX];
 };
 
 struct local_config {
@@ -75,27 +61,36 @@ struct local_config {
 };
 
 struct wan_config {
+    int db_id;
     char ifname[IF_NAMESIZE];
     uint32_t dst_ip;
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
     int dataplane;
+    int bandwidth_weight;
 };
 
 struct app_config {
+    int profile_id;
+    char profile_name[64];
+    int enabled;
+
     struct local_config locals[MAX_INTERFACES];
     int local_count;
 
     struct wan_config wans[MAX_INTERFACES];
     int wan_count;
 
-    char bpf_file[256];
+    struct bridge_config bridges[MAX_BRIDGES_PER_PROFILE];
+    int bridge_count;
+
+    struct pqc_profile_config pqc;
+
+    char bpf_lan_file[256];
     char bpf_wan_file[256];
 
     int crypto_enabled;
     uint16_t fake_ethertype_ipv4;
-    struct profile_config profiles[MAX_PROFILES];
-    int profile_count;
     struct crypto_policy policies[MAX_CRYPTO_POLICIES];
     int policy_count;
 };
@@ -112,12 +107,12 @@ int parse_hex_bytes_pub(const char *str, uint8_t *out, int expected_len);
 int config_validate(struct app_config *cfg);
 int config_local_ifname_in_cfg(const struct app_config *cfg, const char *ifname);
 int config_policy_db_id_taken(const struct app_config *cfg, int db_id);
-const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, int profile_idx,
+const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg,
                                                         uint32_t src_ip, uint32_t dst_ip,
                                                         uint16_t src_port, uint16_t dst_port,
                                                         uint8_t protocol);
 void config_refresh_policy_in_table(struct app_config *cfg);
-int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
+int config_policy_in_ok(const struct app_config *cfg,
                         uint8_t wire_policy_id,
                         uint32_t src_ip, uint32_t dst_ip,
                         uint16_t src_port, uint16_t dst_port,

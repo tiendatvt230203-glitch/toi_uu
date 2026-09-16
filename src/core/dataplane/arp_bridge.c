@@ -79,8 +79,7 @@ static int arp_crypto_ctx_snapshot(const struct app_config *cfg, int profile_idx
     int profile_id;
     int dynamic_ready;
 
-    if (!cfg || !ctx || profile_idx < 0 ||
-        profile_idx >= cfg->profile_count)
+    if (!cfg || !ctx || profile_idx != 0 || !cfg->enabled)
         return -1;
 
     arp_crypto_ctx_init(cfg);
@@ -88,7 +87,7 @@ static int arp_crypto_ctx_snapshot(const struct app_config *cfg, int profile_idx
         return -1;
 
     *ctx = g_arp_crypto_ctx;
-    profile_id = cfg->profiles[profile_idx].id;
+    profile_id = cfg->profile_id;
     ctx->profile_id = profile_id;
     ctx->policy_id = 0;
     ctx->wire_id = (uint8_t)ARP_DEFAULT_WIRE_ID;
@@ -115,14 +114,13 @@ static int arp_crypto_ctx_snapshot(const struct app_config *cfg, int profile_idx
 static int arp_static_ctx_snapshot(const struct app_config *cfg, int profile_idx,
                                    struct packet_crypto_ctx *ctx)
 {
-    if (!cfg || !ctx || profile_idx < 0 ||
-        profile_idx >= cfg->profile_count)
+    if (!cfg || !ctx || profile_idx != 0 || !cfg->enabled)
         return -1;
     arp_crypto_ctx_init(cfg);
     if (!g_arp_crypto_ctx_ready)
         return -1;
     *ctx = g_arp_crypto_ctx;
-    ctx->profile_id = cfg->profiles[profile_idx].id;
+    ctx->profile_id = cfg->profile_id;
     ctx->policy_id = 0;
     ctx->wire_id = (uint8_t)ARP_DEFAULT_WIRE_ID;
     ctx->pqc_from_handshake = false;
@@ -146,7 +144,7 @@ void arp_bridge_reload_policies(struct app_config *cfg)
 
     if (!cfg)
         return;
-    if (cfg->profile_count > 0)
+    if (cfg->enabled)
         (void)arp_crypto_ctx_snapshot(cfg, 0, &ctx, NULL);
 }
 
@@ -167,44 +165,35 @@ static int profile_pi_for_wan_dp(struct forwarder *fwd, int wan_dp)
     if (!fwd || !fwd->cfg)
         return -1;
     cfg_idx = config_wan_dp_to_cfg(fwd->cfg, wan_dp);
-    if (cfg_idx < 0 || fwd->cfg->profile_count < 1)
+    if (cfg_idx < 0 || !fwd->cfg->enabled)
         return -1;
-
-    {
-        const struct profile_config *p = &fwd->cfg->profiles[0];
-
-        if (!p->enabled)
-            return -1;
-        for (int wi = 0; wi < p->wan_count; wi++) {
-            if (p->wan_indices[wi] == cfg_idx)
-                return 0;
-        }
-    }
-    return -1;
+    return cfg_idx < fwd->cfg->wan_count ? 0 : -1;
 }
 
-/* bridges[].local_idx is cfg locals[] index — map to live fwd pair slot by ifname. */
+/* Bridge slots index cfg locals[]/wans[]; map them to live dataplane slots. */
 static int resolve_wan_dp_for_fwd_local(struct forwarder *fwd,
-                                        const struct profile_config *prof,
                                         int fwd_local_idx, int *wan_dp_out)
 {
     const char *ifname;
 
-    if (!fwd || !fwd->cfg || !prof || !wan_dp_out || fwd_local_idx < 0 ||
+    if (!fwd || !fwd->cfg || !wan_dp_out || fwd_local_idx < 0 ||
         fwd_local_idx >= fwd->local_count)
         return -1;
     ifname = fwd->locals[fwd_local_idx].ifname;
     if (!ifname[0])
         return -1;
 
-    for (int i = 0; i < prof->bridge_count; i++) {
-        int ci = prof->bridges[i].local_idx;
+    for (int i = 0; i < fwd->cfg->bridge_count; i++) {
+        int ci = fwd->cfg->bridges[i].local_slot;
 
         if (ci < 0 || ci >= fwd->cfg->local_count)
             continue;
         if (strcmp(fwd->cfg->locals[ci].ifname, ifname) != 0)
             continue;
-        *wan_dp_out = prof->bridges[i].wan_dp;
+        *wan_dp_out = config_wan_cfg_to_dp(
+            fwd->cfg, fwd->cfg->bridges[i].wan_slot);
+        if (*wan_dp_out < 0)
+            return -1;
         return 0;
     }
     return -1;
@@ -251,17 +240,15 @@ static int arp_dp_for_cfg_wan(struct forwarder *fwd, int cfg_wan)
  * Weight=0 WAN vẫn được chọn cho ARP backup nếu đang UP.
  */
 static int arp_pick_backup_wan_dp(struct forwarder *fwd,
-                                  const struct profile_config *prof,
                                   int primary_wan_dp)
 {
     int best = -1;
     uint32_t best_depth = UINT32_MAX;
 
-    if (!fwd || !prof)
+    if (!fwd || !fwd->cfg)
         return -1;
 
-    for (int i = 0; i < prof->wan_count; i++) {
-        int cfg_wan = prof->wan_indices[i];
+    for (int cfg_wan = 0; cfg_wan < fwd->cfg->wan_count; cfg_wan++) {
         int dp;
         uint32_t depth;
 
@@ -287,7 +274,6 @@ static int arp_pick_backup_wan_dp(struct forwarder *fwd,
  * Remote side: who-has flood; unicast → dest MAC FDB.
  */
 static int arp_select_egress_wan(struct forwarder *fwd,
-                                 const struct profile_config *prof,
                                  int primary_wan_dp)
 {
     /* BR WAN up (kể cả weight=0) → luôn join về primary, không backup. */
@@ -295,7 +281,7 @@ static int arp_select_egress_wan(struct forwarder *fwd,
         return primary_wan_dp;
 
     {
-        int backup = arp_pick_backup_wan_dp(fwd, prof, primary_wan_dp);
+        int backup = arp_pick_backup_wan_dp(fwd, primary_wan_dp);
 
         if (backup < 0)
             return -1;
@@ -305,26 +291,20 @@ static int arp_select_egress_wan(struct forwarder *fwd,
 
 static int arp_profile_owns_local(struct forwarder *fwd, int profile_pi, int fwd_local_idx)
 {
-    const struct profile_config *prof;
     const char *ifname;
 
-    if (!fwd || !fwd->cfg || profile_pi < 0 || profile_pi >= fwd->cfg->profile_count)
+    if (!fwd || !fwd->cfg || profile_pi != 0 || !fwd->cfg->enabled)
         return 0;
     if (fwd_local_idx < 0 || fwd_local_idx >= fwd->local_count)
         return 0;
     if (!ne_pair_local_live(&fwd->pair, fwd_local_idx))
         return 0;
 
-    prof = &fwd->cfg->profiles[profile_pi];
-    if (!prof->enabled)
-        return 0;
-
     ifname = fwd->locals[fwd_local_idx].ifname;
     if (!ifname[0])
         return 0;
 
-    for (int i = 0; i < prof->local_count; i++) {
-        int ci = prof->local_indices[i];
+    for (int ci = 0; ci < fwd->cfg->local_count; ci++) {
 
         if (ci < 0 || ci >= fwd->cfg->local_count)
             continue;
@@ -380,23 +360,20 @@ static int arp_flood_push_local(struct forwarder *fwd, struct ne_packet *job,
 static int arp_flood_to_profile_locals(struct forwarder *fwd, struct ne_packet *job,
                                        const uint8_t *pkt, int profile_pi)
 {
-    const struct profile_config *prof;
     int wi;
     int sent = 0;
     uint16_t sent_mask = 0;
 
-    if (!fwd || !job || !pkt || !fwd->cfg || profile_pi < 0 ||
-        profile_pi >= fwd->cfg->profile_count)
+    if (!fwd || !job || !pkt || !fwd->cfg || profile_pi != 0)
         return -1;
 
-    prof = &fwd->cfg->profiles[profile_pi];
-    if (!prof->enabled || prof->local_count <= 0)
+    if (!fwd->cfg->enabled || fwd->cfg->local_count <= 0)
         return -1;
 
     wi = dp_out_ring_idx();
 
-    for (int i = 0; i < prof->local_count; i++) {
-        int li = mac_fwd_local_for_cfg_idx(fwd, prof->local_indices[i]);
+    for (int i = 0; i < fwd->cfg->local_count; i++) {
+        int li = mac_fwd_local_for_cfg_idx(fwd, i);
 
         if (li < 0 || li >= fwd->local_count)
             continue;
@@ -435,22 +412,11 @@ static int profile_pi_for_fwd_local(struct forwarder *fwd, int fwd_li)
     if (!fwd || !fwd->cfg || fwd_li < 0 || fwd_li >= fwd->local_count)
         return -1;
     ifname = fwd->locals[fwd_li].ifname;
-    if (!ifname[0] || fwd->cfg->profile_count < 1)
+    if (!ifname[0] || !fwd->cfg->enabled)
         return -1;
-
-    {
-        const struct profile_config *p = &fwd->cfg->profiles[0];
-
-        if (!p->enabled)
-            return -1;
-        for (int i = 0; i < p->local_count; i++) {
-            int ci = p->local_indices[i];
-
-            if (ci < 0 || ci >= fwd->cfg->local_count)
-                continue;
-            if (strcmp(fwd->cfg->locals[ci].ifname, ifname) == 0)
-                return 0;
-        }
+    for (int ci = 0; ci < fwd->cfg->local_count; ci++) {
+        if (strcmp(fwd->cfg->locals[ci].ifname, ifname) == 0)
+            return 0;
     }
     return -1;
 }
@@ -538,7 +504,6 @@ int arp_bridge_from_local(struct forwarder *fwd, struct ne_packet *job,
                           char egress_ifname[IF_NAMESIZE])
 {
     int profile_pi;
-    const struct profile_config *prof;
     int primary_wan_dp;
     int wan_dp;
     struct ne_ring *ring;
@@ -582,15 +547,14 @@ int arp_bridge_from_local(struct forwarder *fwd, struct ne_packet *job,
     if (profile_pi < 0)
         return -1;
 
-    prof = &fwd->cfg->profiles[profile_pi];
-    if (resolve_wan_dp_for_fwd_local(fwd, prof, ingress_li,
+    if (resolve_wan_dp_for_fwd_local(fwd, ingress_li,
                                      &primary_wan_dp) != 0)
         return -1;
     if (primary_wan_dp < 0 || primary_wan_dp >= fwd->wan_count)
         return -1;
 
     /* BR WAN up → dùng BR; BR down → failover ARP sang WAN UP bất kỳ. */
-    wan_dp = arp_select_egress_wan(fwd, prof, primary_wan_dp);
+    wan_dp = arp_select_egress_wan(fwd, primary_wan_dp);
     if (wan_dp < 0)
         return -1;
 

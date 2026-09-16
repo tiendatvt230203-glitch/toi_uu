@@ -124,11 +124,9 @@ void main_diag_ne_pqc_configure(const struct app_config *cfg)
     if (cfg) {
         int row = 0;
 
-        for (int pidx = 0; pidx < cfg->profile_count; pidx++) {
-            const struct profile_config *profile = &cfg->profiles[pidx];
-
-            for (int j = 0; j < profile->policy_count; j++) {
-                int policy_idx = profile->policy_indices[j];
+        {
+            for (int policy_idx = 0; policy_idx < cfg->policy_count;
+                 policy_idx++) {
                 const struct crypto_policy *policy;
 
                 if (policy_idx < 0 || policy_idx >= cfg->policy_count)
@@ -141,7 +139,7 @@ void main_diag_ne_pqc_configure(const struct app_config *cfg)
 
                     for (int i = 0; i < row; i++) {
                         if (!ne_pqc_tbl[i].is_arp &&
-                            ne_pqc_tbl[i].profile_id == profile->id &&
+                            ne_pqc_tbl[i].profile_id == cfg->profile_id &&
                             ne_pqc_tbl[i].policy_id == policy->db_id) {
                             duplicate = 1;
                             break;
@@ -153,7 +151,7 @@ void main_diag_ne_pqc_configure(const struct app_config *cfg)
                 if (row >= NE_PQC_TBL_SLOTS)
                     break;
 
-                ne_pqc_tbl[row].profile_id = profile->id;
+                ne_pqc_tbl[row].profile_id = cfg->profile_id;
                 ne_pqc_tbl[row].policy_id = policy->db_id;
                 ne_pqc_tbl[row].valid = 1;
                 row++;
@@ -348,7 +346,7 @@ void main_diag_log_db_apply(const struct app_config *cfg, int trigger_profile_id
     }
     fprintf(stderr, "\n");
     fprintf(stderr, "| profiles: %-3d | policies: %-3d |\n",
-            cfg->profile_count, cfg->policy_count);
+            cfg->profile_id > 0 ? 1 : 0, cfg->policy_count);
     print_system_table(cfg, "db-load");
     fprintf(stderr, "\n");
     fflush(stderr);
@@ -367,7 +365,7 @@ void main_diag_log_db_policy_apply(const struct app_config *cfg, int trigger_pro
                 prev_cfg->policy_count, cfg->policy_count);
     }
     fprintf(stderr, "| profiles: %-3d | policies: %-3d |\n",
-            cfg->profile_count, cfg->policy_count);
+            cfg->profile_id > 0 ? 1 : 0, cfg->policy_count);
     fprintf(stderr, "\n");
     fflush(stderr);
 }
@@ -385,7 +383,7 @@ void main_diag_log_config_summary(struct app_config *cfg, int trigger_profile_id
         fprintf(stderr, "+-- CONFIG profile %d --+\n", trigger_profile_id);
     }
     fprintf(stderr, "| profiles: %-3d | policies: %-3d |\n",
-            cfg->profile_count, cfg->policy_count);
+            cfg->profile_id > 0 ? 1 : 0, cfg->policy_count);
     if (!policy_only)
         print_system_table(cfg, is_reload ? "reload" : "config");
     fprintf(stderr, "\n");

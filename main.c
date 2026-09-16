@@ -406,31 +406,29 @@ static int wan_db_equal(const struct wan_config *a, const struct wan_config *b)
            a->dataplane == b->dataplane;
 }
 
-static int profile_db_unchanged(const struct profile_config *old,
-                                const struct profile_config *new,
-                                const struct app_config *ocfg,
-                                const struct app_config *ncfg)
+static int profile_db_unchanged(const struct app_config *old,
+                                const struct app_config *new)
 {
-    if (old->id != new->id ||
+    if (old->profile_id != new->profile_id ||
         old->enabled != new->enabled ||
-        old->bridge_enable != new->bridge_enable ||
         old->bridge_count != new->bridge_count ||
         old->policy_count != new->policy_count ||
         old->local_count != new->local_count ||
         old->wan_count != new->wan_count ||
-        strcmp(old->name, new->name) != 0 ||
-        strcmp(old->local_identity_fingerprint, new->local_identity_fingerprint) != 0 ||
-        strcmp(old->peer_fingerprint, new->peer_fingerprint) != 0 ||
-        old->pqc_is_initiator != new->pqc_is_initiator ||
-        old->has_pqc_identity != new->has_pqc_identity ||
-        strcmp(old->pqc_peer_pub, new->pqc_peer_pub) != 0)
+        strcmp(old->profile_name, new->profile_name) != 0 ||
+        strcmp(old->pqc.local_identity_fingerprint,
+               new->pqc.local_identity_fingerprint) != 0 ||
+        strcmp(old->pqc.peer_fingerprint, new->pqc.peer_fingerprint) != 0 ||
+        old->pqc.is_initiator != new->pqc.is_initiator ||
+        old->pqc.has_pqc_identity != new->pqc.has_pqc_identity ||
+        strcmp(old->pqc.peer_public_key, new->pqc.peer_public_key) != 0)
         return 0;
 
     for (int i = 0; i < old->policy_count; i++) {
-        int odb = ocfg->policies[old->policy_indices[i]].db_id;
+        int odb = old->policies[i].db_id;
         int found = 0;
         for (int j = 0; j < new->policy_count; j++) {
-            int ndb = ncfg->policies[new->policy_indices[j]].db_id;
+            int ndb = new->policies[j].db_id;
             if (odb == ndb) {
                 found = 1;
                 break;
@@ -440,10 +438,10 @@ static int profile_db_unchanged(const struct profile_config *old,
             return 0;
     }
     for (int j = 0; j < new->policy_count; j++) {
-        int ndb = ncfg->policies[new->policy_indices[j]].db_id;
+        int ndb = new->policies[j].db_id;
         int found = 0;
         for (int i = 0; i < old->policy_count; i++) {
-            int odb = ocfg->policies[old->policy_indices[i]].db_id;
+            int odb = old->policies[i].db_id;
             if (odb == ndb) {
                 found = 1;
                 break;
@@ -453,18 +451,13 @@ static int profile_db_unchanged(const struct profile_config *old,
             return 0;
     }
 
-    for (int i = 0; i < old->local_count; i++) {
-        if (old->local_indices[i] != new->local_indices[i])
-            return 0;
-    }
     for (int i = 0; i < old->wan_count; i++) {
-        if (old->wan_indices[i] != new->wan_indices[i] ||
-            old->wan_bandwidth_weight[i] != new->wan_bandwidth_weight[i])
+        if (old->wans[i].bandwidth_weight != new->wans[i].bandwidth_weight)
             return 0;
     }
     for (int i = 0; i < old->bridge_count; i++) {
-        if (old->bridges[i].local_idx != new->bridges[i].local_idx ||
-            old->bridges[i].wan_dp != new->bridges[i].wan_dp ||
+        if (old->bridges[i].local_slot != new->bridges[i].local_slot ||
+            old->bridges[i].wan_slot != new->bridges[i].wan_slot ||
             strcmp(old->bridges[i].ifname, new->bridges[i].ifname) != 0)
             return 0;
     }
@@ -480,10 +473,9 @@ static int config_db_unchanged(const struct app_config *old,
     if (old->local_count != new->local_count ||
         old->wan_count != new->wan_count ||
         old->policy_count != new->policy_count ||
-        old->profile_count != new->profile_count ||
         old->crypto_enabled != new->crypto_enabled ||
         old->fake_ethertype_ipv4 != new->fake_ethertype_ipv4 ||
-        strcmp(old->bpf_file, new->bpf_file) != 0 ||
+        strcmp(old->bpf_lan_file, new->bpf_lan_file) != 0 ||
         strcmp(old->bpf_wan_file, new->bpf_wan_file) != 0)
         return 0;
 
@@ -503,17 +495,15 @@ static int config_db_unchanged(const struct app_config *old,
     if (!policies_db_unchanged(old, new))
         return 0;
 
-    if (old->profile_count < 1 || new->profile_count < 1)
-        return 0;
-    return profile_db_unchanged(&old->profiles[0], &new->profiles[0], old, new);
+    return profile_db_unchanged(old, new);
 }
 
-static int profiles_fully_unchanged(const struct app_config *old,
+static int active_profile_unchanged(const struct app_config *old,
                                     const struct app_config *new)
 {
-    if (!old || !new || old->profile_count < 1 || new->profile_count < 1)
+    if (!old || !new)
         return 0;
-    return profile_db_unchanged(&old->profiles[0], &new->profiles[0], old, new);
+    return profile_db_unchanged(old, new);
 }
 
 
@@ -550,7 +540,7 @@ static int runtime_tuning_only_change(const struct app_config *old,
         return 0;
     if (!policies_db_unchanged(old, new))
         return 0;
-    return profiles_fully_unchanged(old, new);
+    return active_profile_unchanged(old, new);
 }
 
 static int apply_active_configs(struct runtime_state *rt, int profile_id) {
@@ -559,7 +549,7 @@ static int apply_active_configs(struct runtime_state *rt, int profile_id) {
         fprintf(stderr, "[FATAL] out of memory building config\n");
         return -1;
     }
-    if (load_profile_config(new_cfg, profile_id) != 0) {
+    if (load_active_profile_config(new_cfg, profile_id) != 0) {
         fprintf(stderr,
                 "[ERR] profile %d: failed to load config from Postgres (see [DB] lines above)\n",
                 profile_id);
@@ -587,7 +577,7 @@ static int apply_active_configs(struct runtime_state *rt, int profile_id) {
                 profile_id);
         fflush(stderr);
         usleep(500000);
-        if (load_profile_config(&rt->cfg_slots[next_slot], profile_id) != 0) {
+        if (load_active_profile_config(&rt->cfg_slots[next_slot], profile_id) != 0) {
             fprintf(stderr,
                     "[ERR] profile %d: DB reload retry failed (see [DB] lines above)\n",
                     profile_id);

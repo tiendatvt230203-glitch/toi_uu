@@ -11,7 +11,9 @@
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/core/flow/flow_table.h"
+#include "../../../inc/core/flow/mac_learn.h"
 
 #include <netinet/in.h>
 #include <string.h>
@@ -25,12 +27,12 @@ static int tcp_bond_active(struct forwarder *fwd, int profile_idx)
     int allowed[MAX_INTERFACES];
     int weights[MAX_INTERFACES];
 
-    if (!fwd || !fwd->cfg || profile_idx < 0 ||
-        profile_idx >= fwd->cfg->profile_count)
+    if (!fwd || !fwd->cfg || profile_idx != 0 || !fwd->cfg->enabled)
         return 0;
-    return fwd_wan_build_profile_pool(fwd, &fwd->cfg->profiles[profile_idx],
+    return fwd_wan_build_profile_pool(fwd, fwd->cfg,
                                       allowed, weights, MAX_INTERFACES) > 1;
 }
+
 static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
 {
     int ri = dp_out_ring_idx();
@@ -146,23 +148,13 @@ static int pick_profile_policy(struct forwarder *fwd, int local_idx, int flow_ok
                             int *profile_idx, const struct crypto_policy **cp)
 {
     const struct crypto_policy *c;
-    const struct profile_config *p;
-    int found = 0;
-
-    if (!fwd || !fwd->cfg || !profile_idx || !cp || fwd->cfg->profile_count < 1)
+    if (!fwd || !fwd->cfg || !profile_idx || !cp || !fwd->cfg->enabled)
         return -1;
-
-    p = &fwd->cfg->profiles[0];
-    if (!p->enabled)
-        return -1;
-    for (int i = 0; i < p->local_count; i++) {
-        if (p->local_indices[i] == local_idx)
-            found = 1;
-    }
-    if (!found)
+    if (local_idx < 0 || local_idx >= fwd->cfg->local_count)
         return -1;
     c = flow_ok
-        ? config_select_crypto_policy(fwd->cfg, 0, src_ip, dst_ip, src_port, dst_port, proto)
+        ? config_select_crypto_policy(fwd->cfg, src_ip, dst_ip,
+                                      src_port, dst_port, proto)
         : NULL;
     if (!c)
         return -1;
@@ -232,8 +224,20 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (pick_profile_policy(fwd, li, flow_ok, src_ip, dst_ip, src_port, dst_port, proto,
                             &profile_idx, &cp) != 0)
         goto drop;
-    wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
-                                    src_port, dst_port, proto);
+    if (proto == IPPROTO_ICMP) {
+        wan_dp = -1;
+        for (int dp = 0; dp < fwd->wan_count; dp++) {
+            if (mac_fwd_local_for_wan_dp(fwd, profile_idx, dp) == li &&
+                ne_pair_wan_live(&fwd->pair, dp) &&
+                !fwd_wan_is_stopped(dp) && !wan_failover_dp_excluded(dp)) {
+                wan_dp = dp;
+                break;
+            }
+        }
+    } else {
+        wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
+                                        src_port, dst_port, proto);
+    }
     if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
         goto drop;
 

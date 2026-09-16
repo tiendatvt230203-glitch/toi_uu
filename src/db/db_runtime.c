@@ -36,7 +36,7 @@ int ne_profile_id_exists(int profile_id) {
     return ok ? 0 : -1;
 }
 
-int load_profile_config(struct app_config *out_cfg, int profile_id)
+int load_active_profile_config(struct app_config *out_cfg, int profile_id)
 {
     if (!out_cfg || profile_id <= 0)
         return -1;

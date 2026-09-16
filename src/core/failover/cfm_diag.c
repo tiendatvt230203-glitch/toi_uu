@@ -144,12 +144,12 @@ static void cfm_bridge_for_wan_dp(const struct app_config *cfg, int wan_dp,
     out[0] = '\0';
     if (!cfg || wan_dp < 0)
         return;
-    if (cfg->profile_count > 0) {
-        const struct profile_config *p = &cfg->profiles[0];
-
-        for (int bi = 0; bi < p->bridge_count; bi++) {
-            if (p->bridges[bi].wan_dp == wan_dp && p->bridges[bi].ifname[0]) {
-                strncpy(out, p->bridges[bi].ifname, IFNAMSIZ - 1);
+    if (cfg->enabled) {
+        for (int bi = 0; bi < cfg->bridge_count; bi++) {
+            if (config_wan_cfg_to_dp(cfg,
+                    cfg->bridges[bi].wan_slot) == wan_dp &&
+                cfg->bridges[bi].ifname[0]) {
+                strncpy(out, cfg->bridges[bi].ifname, IFNAMSIZ - 1);
                 out[IFNAMSIZ - 1] = '\0';
                 return;
             }

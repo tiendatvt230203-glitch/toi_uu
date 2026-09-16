@@ -25,13 +25,9 @@ static int fwd_ensure_mid_wan_rings(struct forwarder *fwd, int di)
     return 0;
 }
 
-static const struct profile_config *profile_by_id(const struct app_config *cfg, int profile_id)
+static int profile_id_matches(const struct app_config *cfg, int profile_id)
 {
-    if (!cfg || profile_id <= 0 || cfg->profile_count < 1)
-        return NULL;
-    if (cfg->profiles[0].id == profile_id)
-        return &cfg->profiles[0];
-    return NULL;
+    return cfg && profile_id > 0 && cfg->profile_id == profile_id;
 }
 
 static int pair_wan_dp_slot_live(const struct forwarder *fwd, const char *ifname)
@@ -113,13 +109,10 @@ void profile_iface_life_attach_wan_rows(struct forwarder *fwd,
                                        int trigger_profile_id,
                                        struct profile_attach_sess *sess)
 {
-    const struct profile_config *prof = profile_by_id(new_cfg, trigger_profile_id);
-
-    if (!prof || !sess || !fwd || !new_cfg)
+    if (!profile_id_matches(new_cfg, trigger_profile_id) || !sess || !fwd)
         return;
 
-    for (int pi = 0; pi < prof->wan_count; pi++) {
-        int ci = prof->wan_indices[pi];
+    for (int ci = 0; ci < new_cfg->wan_count; ci++) {
         const char *ifname;
         int di;
 

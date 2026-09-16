@@ -261,35 +261,29 @@ static int profile_pi_for_wire_policy(struct forwarder *fwd, uint8_t wire_id)
     if (!fwd || !fwd->cfg)
         return -1;
     profile_id = fwd_crypto_profile_id_for_wire_id(wire_id);
-    if (profile_id < 0 || fwd->cfg->profile_count < 1)
+    if (profile_id < 0 || !fwd->cfg->enabled)
         return -1;
-    if (fwd->cfg->profiles[0].id == profile_id)
+    if (fwd->cfg->profile_id == profile_id)
         return 0;
     return -1;
 }
 
 static int profile_owns_local(struct forwarder *fwd, int profile_pi, int fwd_local_idx)
 {
-    const struct profile_config *prof;
     const char *ifname;
 
-    if (!fwd || !fwd->cfg || profile_pi < 0 || profile_pi >= fwd->cfg->profile_count)
+    if (!fwd || !fwd->cfg || profile_pi != 0 || !fwd->cfg->enabled)
         return 0;
     if (fwd_local_idx < 0 || fwd_local_idx >= fwd->local_count)
         return 0;
     if (!ne_pair_local_live(&fwd->pair, fwd_local_idx))
         return 0;
 
-    prof = &fwd->cfg->profiles[profile_pi];
-    if (!prof->enabled)
-        return 0;
-
     ifname = fwd->locals[fwd_local_idx].ifname;
     if (!ifname[0])
         return 0;
 
-    for (int i = 0; i < prof->local_count; i++) {
-        int ci = prof->local_indices[i];
+    for (int ci = 0; ci < fwd->cfg->local_count; ci++) {
 
         if (ci < 0 || ci >= fwd->cfg->local_count)
             continue;
@@ -308,15 +302,13 @@ static int wan_profile_pi_bypass(struct forwarder *fwd, const uint8_t *pkt, uint
     uint8_t proto = 0;
     const struct crypto_policy *cp;
 
-    if (!fwd || !pkt || !fwd->cfg || fwd->cfg->profile_count < 1)
-        return -1;
-    if (!fwd->cfg->profiles[0].enabled)
+    if (!fwd || !pkt || !fwd->cfg || !fwd->cfg->enabled)
         return -1;
     if (dp_parse_flow((void *)pkt, len, &src_ip, &dst_ip,
                       &src_port, &dst_port, &proto) != 0)
         return -1;
 
-    cp = config_select_crypto_policy(fwd->cfg, 0, dst_ip, src_ip,
+    cp = config_select_crypto_policy(fwd->cfg, dst_ip, src_ip,
                                      dst_port, src_port, proto);
     if (!cp || cp->action != POLICY_ACTION_BYPASS)
         return -1;
@@ -336,7 +328,7 @@ static int wan_policy_in_ok(struct forwarder *fwd, int profile_pi,
     if (dp_parse_flow((void *)pkt, len, &src_ip, &dst_ip,
                       &src_port, &dst_port, &proto) != 0)
         return 0;
-    return config_policy_in_ok(fwd->cfg, profile_pi, wire_policy_id,
+    return config_policy_in_ok(fwd->cfg, wire_policy_id,
                                src_ip, dst_ip, src_port, dst_port, proto);
 }
 
@@ -360,15 +352,12 @@ static int wan_profile_pi(struct forwarder *fwd, const uint8_t *pkt, uint32_t le
 static int profile_single_local_for_wan(struct forwarder *fwd, int profile_pi,
                                         int ingress_wan_dp)
 {
-    const struct profile_config *prof;
     int mapped;
 
-    if (!fwd || !fwd->cfg || ingress_wan_dp < 0 || profile_pi < 0 ||
-        profile_pi >= fwd->cfg->profile_count)
+    if (!fwd || !fwd->cfg || ingress_wan_dp < 0 || profile_pi != 0)
         return -1;
-    prof = &fwd->cfg->profiles[profile_pi];
     /* Keep the multi-LAN path at its original cost and behavior. */
-    if (!prof->enabled || prof->local_count != 1)
+    if (!fwd->cfg->enabled || fwd->cfg->local_count != 1)
         return -1;
     mapped = mac_fwd_local_for_wan_dp(fwd, profile_pi, ingress_wan_dp);
     if (mapped < 0 || !profile_owns_local(fwd, profile_pi, mapped))

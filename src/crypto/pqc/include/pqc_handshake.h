@@ -238,7 +238,8 @@ void sig_pqc_arp_clear(void);
 void sig_pqc_prepare_reload(void);
 void sig_pqc_finalize_reload(void);
 
-void sig_pqc_load_and_bind_policy(void *conn_ptr, const void *cfg_ptr, int profile_idx, int db_policy_id, int profile_id);
+void sig_pqc_load_and_bind_policy(void *conn_ptr, int db_policy_id,
+                                  int profile_id);
 
 struct app_config;
 void pqc_handshake_start_all_profiles(struct app_config *cfg);

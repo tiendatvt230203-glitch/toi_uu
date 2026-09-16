@@ -30,7 +30,7 @@ int fwd_wan_admin_is_held(int dp);
 uint32_t fwd_wan_flush_queue(struct forwarder *fwd, int wan_idx);
 int fwd_wan_has_tx_room(struct forwarder *fwd, int wan_idx);
 
-int fwd_wan_build_profile_pool(struct forwarder *fwd, const struct profile_config *p,
+int fwd_wan_build_profile_pool(struct forwarder *fwd, const struct app_config *cfg,
                                int *allowed_wans, int *allowed_weights, int max_n);
 
 int fwd_wan_live_dp_for_cfg(struct forwarder *fwd, int cfg_wan);

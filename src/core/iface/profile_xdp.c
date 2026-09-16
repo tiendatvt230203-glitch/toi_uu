@@ -296,7 +296,7 @@ int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg
         p->xdp_local_on[pair_li] = 0;
     }
 
-    if (open_bpf_object(cfg->bpf_file, &p->bpf_locals[pair_li],
+    if (open_bpf_object(cfg->bpf_lan_file, &p->bpf_locals[pair_li],
                         "xdp_redirect_prog", &prog, "xsks_map", &map) != 0)
         return -1;
     profile_iface_xdp_link_off(ifname);
@@ -368,19 +368,14 @@ int profile_iface_xdp_sync_wan_live(struct forwarder *fwd, const struct app_conf
 {
     if (!fwd || !new_cfg || !old_cfg || forwarder_should_stop())
         return -1;
-    if (new_cfg->profile_count < 1)
+    if (!new_cfg->enabled)
         return 0;
 
     {
-        const struct profile_config *prof = &new_cfg->profiles[0];
         struct profile_attach_sess sess;
         int need_attach = 0;
 
-        for (int wi = 0; wi < prof->wan_count; wi++) {
-            int ci = prof->wan_indices[wi];
-
-            if (ci < 0 || ci >= new_cfg->wan_count)
-                continue;
+        for (int ci = 0; ci < new_cfg->wan_count; ci++) {
             if (!config_wan_live(new_cfg, ci))
                 continue;
             if (pair_wan_dp_slot_live(fwd, new_cfg->wans[ci].ifname) >= 0)
@@ -392,12 +387,13 @@ int profile_iface_xdp_sync_wan_live(struct forwarder *fwd, const struct app_conf
             return 0;
 
         memset(&sess, 0, sizeof(sess));
-        profile_iface_life_attach_wan_rows(fwd, new_cfg, prof->id, &sess);
+        profile_iface_life_attach_wan_rows(fwd, new_cfg,
+                                           new_cfg->profile_id, &sess);
         if (sess.validate_failed) {
             profile_iface_life_attach_rollback(fwd, &sess);
             fprintf(stderr,
                     "[PROFILE-XDP] profile %d: WAN live attach failed\n",
-                    prof->id);
+                    new_cfg->profile_id);
             return -1;
         }
         if (sess.wan_n > 0)

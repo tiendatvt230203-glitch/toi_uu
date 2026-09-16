@@ -4,6 +4,6 @@
 #include "core/util/config.h"
 
 int ne_profile_id_exists(int profile_id);
-int load_profile_config(struct app_config *out_cfg, int profile_id);
+int load_active_profile_config(struct app_config *out_cfg, int profile_id);
 
 #endif

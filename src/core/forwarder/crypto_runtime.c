@@ -345,15 +345,12 @@ void forwarder_pre_diversify_pqc_keys(int profile_id)
 
 void fwd_crypto_sync_pqc_session_keys(const struct app_config *cfg)
 {
-    if (!cfg || !cfg->crypto_enabled || cfg->profile_count < 1)
+    if (!cfg || !cfg->crypto_enabled || !cfg->enabled)
         return;
 
     pthread_mutex_lock(&policy_crypto_lock);
     {
-        const struct profile_config *prof = &cfg->profiles[0];
-
-        for (int j = 0; j < prof->policy_count; j++) {
-            int pi = prof->policy_indices[j];
+        for (int pi = 0; pi < cfg->policy_count; pi++) {
             const struct crypto_policy *cp;
             int ctx_i = -1;
 
@@ -372,7 +369,7 @@ void fwd_crypto_sync_pqc_session_keys(const struct app_config *cfg)
             if (ctx_i < 0 || !policy_crypto_ready[ctx_i])
                 continue;
 
-            policy_crypto_ctx[ctx_i].profile_id = prof->id;
+            policy_crypto_ctx[ctx_i].profile_id = cfg->profile_id;
             policy_crypto_ctx[ctx_i].policy_id = cp->db_id;
             policy_crypto_ctx[ctx_i].wire_id = (uint8_t)cp->id;
 
@@ -471,19 +468,18 @@ int fwd_crypto_rebuild(struct app_config *cfg)
         ne_pqc_on_key_material(&policy_crypto_ctx[i]);
     }
 
-    if (cfg->profile_count > 0) {
-        const struct profile_config *p = &cfg->profiles[0];
-        for (int j = 0; j < p->policy_count && j < MAX_CRYPTO_POLICIES; j++) {
-            int pi = p->policy_indices[j];
+    if (cfg->enabled) {
+        for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES;
+             pi++) {
             if (pi < 0 || pi >= cfg->policy_count)
                 continue;
             const struct crypto_policy *cp = &cfg->policies[pi];
             if (!crypto_policy_is_encrypt(cp))
                 continue;
             if (cp->id >= 0 && cp->id <= 255)
-                policy_profile_id_by_wire_id[(uint8_t)cp->id] = p->id;
+                policy_profile_id_by_wire_id[(uint8_t)cp->id] = cfg->profile_id;
             if (policy_crypto_ready[pi]) {
-                policy_crypto_ctx[pi].profile_id = p->id;
+                policy_crypto_ctx[pi].profile_id = cfg->profile_id;
                 policy_crypto_ctx[pi].policy_id = cp->db_id;
             }
         }

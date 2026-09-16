@@ -26,9 +26,9 @@ typedef struct {
     int active;
     int profile_id;
     int n;
-    int wan_cfg[MAX_PROFILE_INTERFACES];
-    int old_w[MAX_PROFILE_INTERFACES];
-    int new_w[MAX_PROFILE_INTERFACES];
+    int wan_cfg[MAX_INTERFACES];
+    int old_w[MAX_INTERFACES];
+    int new_w[MAX_INTERFACES];
     uint64_t start_ms;
     uint64_t until_ms;
 } wan_weight_blend;
@@ -45,7 +45,7 @@ static wan_drain_slot wan_drains[MAX_INTERFACES];
 static int wan_active_dp_count;
 static uint8_t wan_stopped[MAX_INTERFACES];
 static uint8_t wan_admin_hold[MAX_INTERFACES];
-static wan_weight_blend wan_weight_blends[MAX_PROFILES];
+static wan_weight_blend wan_weight_blends[NE_PROFILE_SLOTS];
 static wan_join_ramp wan_joins[MAX_INTERFACES];
 
 static uint64_t monotonic_ms(void)
@@ -57,19 +57,9 @@ static uint64_t monotonic_ms(void)
 
 static int wan_seed_weight_from_cfg(const struct app_config *cfg, int cfg_wan)
 {
-    int best = 1;
-    const struct profile_config *p;
+    int weight = config_wan_profile_weight(cfg, cfg_wan);
 
-    if (!cfg || cfg->profile_count < 1)
-        return best;
-    p = &cfg->profiles[0];
-    for (int wi = 0; wi < p->wan_count; wi++) {
-        if (p->wan_indices[wi] != cfg_wan)
-            continue;
-        if (p->wan_bandwidth_weight[wi] > best)
-            best = p->wan_bandwidth_weight[wi];
-    }
-    return best;
+    return weight > 0 ? weight : 1;
 }
 
 static int wan_drain_taper_pct(int dp)
@@ -260,10 +250,10 @@ static int wan_weight_blend_progress(const wan_weight_blend *b)
     return (int)((elapsed * 100ULL) / total);
 }
 
-static int profile_wan_weight_blended(const struct profile_config *p, int cfg_wan,
+static int profile_wan_weight_blended(const struct app_config *cfg, int cfg_wan,
                                       int nominal_weight)
 {
-    if (!p || nominal_weight <= 0)
+    if (!cfg || nominal_weight <= 0)
         return nominal_weight;
 
     {
@@ -272,7 +262,7 @@ static int profile_wan_weight_blended(const struct profile_config *p, int cfg_wa
         int blend;
         int w;
 
-        if (!b->active || b->profile_id != p->id)
+        if (!b->active || b->profile_id != cfg->profile_id)
             return nominal_weight;
         pos = -1;
         for (int i = 0; i < b->n; i++) {
@@ -370,26 +360,25 @@ void fwd_wan_weight_blend_begin(const struct app_config *old, const struct app_c
 
     wan_weight_blends[0].active = 0;
 
-    if (old->profile_count < 1 || new->profile_count < 1) {
+    if (!old->enabled || !new->enabled) {
         fflush(stderr);
         return;
     }
 
     {
-        const struct profile_config *np = &new->profiles[0];
-        const struct profile_config *op = &old->profiles[0];
         int changed = 0;
         int slot;
         wan_weight_blend *b;
 
         (void)profile_slot_for_id;
-        if (op->id != np->id || op->wan_count != np->wan_count) {
+        if (old->profile_id != new->profile_id ||
+            old->wan_count != new->wan_count) {
             fflush(stderr);
             return;
         }
-        for (int i = 0; i < np->wan_count; i++) {
-            if (op->wan_indices[i] != np->wan_indices[i] ||
-                op->wan_bandwidth_weight[i] != np->wan_bandwidth_weight[i]) {
+        for (int i = 0; i < new->wan_count; i++) {
+            if (old->wans[i].bandwidth_weight !=
+                new->wans[i].bandwidth_weight) {
                 changed = 1;
                 break;
             }
@@ -402,18 +391,18 @@ void fwd_wan_weight_blend_begin(const struct app_config *old, const struct app_c
         slot = 0;
         b = &wan_weight_blends[slot];
         b->active = 1;
-        b->profile_id = np->id;
-        b->n = np->wan_count;
+        b->profile_id = new->profile_id;
+        b->n = new->wan_count;
         b->start_ms = monotonic_ms();
         b->until_ms = b->start_ms + WAN_DRAIN_GRACE_MS;
-        for (int i = 0; i < np->wan_count && i < MAX_PROFILE_INTERFACES; i++) {
-            b->wan_cfg[i] = np->wan_indices[i];
-            b->old_w[i] = op->wan_bandwidth_weight[i];
-            b->new_w[i] = np->wan_bandwidth_weight[i];
+        for (int i = 0; i < new->wan_count && i < MAX_INTERFACES; i++) {
+            b->wan_cfg[i] = i;
+            b->old_w[i] = old->wans[i].bandwidth_weight;
+            b->new_w[i] = new->wans[i].bandwidth_weight;
         }
         fprintf(stderr,
                 "[WAN-BALANCE] profile %d — WAN weights blend %us (old→new, flows migrate gradually)\n",
-                np->id, (unsigned)(WAN_DRAIN_GRACE_MS / 1000u));
+                new->profile_id, (unsigned)(WAN_DRAIN_GRACE_MS / 1000u));
     }
     fflush(stderr);
 }
@@ -439,21 +428,22 @@ int fwd_wan_live_dp_for_cfg(struct forwarder *fwd, int cfg_wan)
     return -1;
 }
 
-int fwd_wan_build_profile_pool(struct forwarder *fwd, const struct profile_config *p,
+int fwd_wan_build_profile_pool(struct forwarder *fwd, const struct app_config *cfg,
                                int *allowed_wans, int *allowed_weights, int max_n)
 {
-    int live_cfg[MAX_PROFILE_INTERFACES];
-    int live_w[MAX_PROFILE_INTERFACES];
+    int live_cfg[MAX_INTERFACES];
+    int live_w[MAX_INTERFACES];
     int live_n = 0;
     int dead_weight = 0;
     int n = 0;
 
-    if (!fwd || !p || !allowed_wans || !allowed_weights || max_n <= 0)
+    if (!fwd || !cfg || !allowed_wans || !allowed_weights || max_n <= 0)
         return 0;
 
-    for (int i = 0; i < p->wan_count && live_n < MAX_PROFILE_INTERFACES; i++) {
-        int wi = p->wan_indices[i];
-        int base = profile_wan_weight_blended(p, wi, p->wan_bandwidth_weight[i]);
+    for (int wi = 0; wi < cfg->wan_count && live_n < MAX_INTERFACES;
+         wi++) {
+        int base = profile_wan_weight_blended(
+            cfg, wi, cfg->wans[wi].bandwidth_weight);
         int dp;
         int ramp;
 
@@ -548,15 +538,13 @@ static int pick_least_loaded_wan(struct forwarder *fwd, int profile_idx, int sel
     uint32_t best_depth = UINT32_MAX;
     int profile_pool = 0;
 
-    if (profile_idx >= 0 && profile_idx < fwd->cfg->profile_count) {
-        struct profile_config *p = &fwd->cfg->profiles[profile_idx];
-
-        profile_pool = p->wan_count > 0;
-        for (int i = 0; i < p->wan_count; i++) {
+    if (profile_idx == 0 && fwd->cfg->enabled) {
+        profile_pool = fwd->cfg->wan_count > 0;
+        for (int i = 0; i < fwd->cfg->wan_count; i++) {
             /* weight=0: ARP-only — never pick for data fallback. */
-            if (p->wan_bandwidth_weight[i] <= 0)
+            if (fwd->cfg->wans[i].bandwidth_weight <= 0)
                 continue;
-            int dp = fwd_wan_live_dp_for_cfg(fwd, p->wan_indices[i]);
+            int dp = fwd_wan_live_dp_for_cfg(fwd, i);
             if (dp < 0 || !fwd_wan_has_tx_room(fwd, dp))
                 continue;
             uint32_t d = fwd_mid_to_wan_depth(fwd, dp);
@@ -591,13 +579,13 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
 {
     if (!fwd || fwd->wan_count <= 0)
         return -1;
-    if (profile_idx < 0 || profile_idx >= fwd->cfg->profile_count)
+    if (profile_idx != 0 || !fwd->cfg->enabled)
         return pick_least_loaded_wan(fwd, profile_idx, 0);
 
-    struct profile_config *p = &fwd->cfg->profiles[profile_idx];
     int allowed_wans[MAX_INTERFACES];
     int allowed_weights[MAX_INTERFACES];
-    int pool_n = fwd_wan_build_profile_pool(fwd, p, allowed_wans, allowed_weights,
+    int pool_n = fwd_wan_build_profile_pool(fwd, fwd->cfg,
+                                            allowed_wans, allowed_weights,
                                             MAX_INTERFACES);
     if (pool_n <= 0)
         return pick_least_loaded_wan(fwd, profile_idx, 0);

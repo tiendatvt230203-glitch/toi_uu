@@ -127,22 +127,9 @@ int config_local_ifname_in_cfg(const struct app_config *cfg, const char *ifname)
 
 int config_wan_profile_weight(const struct app_config *cfg, int wan_idx)
 {
-    int best = 0;
-
-    if (!cfg || wan_idx < 0 || wan_idx >= cfg->wan_count || cfg->profile_count < 1)
+    if (!cfg || wan_idx < 0 || wan_idx >= cfg->wan_count)
         return 0;
-
-    {
-        const struct profile_config *p = &cfg->profiles[0];
-
-        for (int wi = 0; wi < p->wan_count; wi++) {
-            if (p->wan_indices[wi] != wan_idx)
-                continue;
-            if (p->wan_bandwidth_weight[wi] > best)
-                best = p->wan_bandwidth_weight[wi];
-        }
-    }
-    return best;
+    return cfg->wans[wan_idx].bandwidth_weight;
 }
 
 int config_wan_live(const struct app_config *cfg, int wan_idx)
@@ -204,6 +191,11 @@ int config_wan_dp_to_cfg(const struct app_config *cfg, int dp_idx)
 }
 
 int config_validate(struct app_config *cfg) {
+    if (!cfg || cfg->profile_id <= 0) {
+        fprintf(stderr, "CONFIG: active profile is not specified\n");
+        return -1;
+    }
+
     for (int i = 0; i < cfg->local_count; i++) {
         struct local_config *local = &cfg->locals[i];
 
@@ -221,6 +213,18 @@ int config_validate(struct app_config *cfg) {
             return -1;
         }
 
+    }
+
+    for (int i = 0; i < cfg->bridge_count; i++) {
+        const struct bridge_config *bridge = &cfg->bridges[i];
+
+        if (bridge->local_slot < 0 || bridge->local_slot >= cfg->local_count ||
+            bridge->wan_slot < 0 || bridge->wan_slot >= cfg->wan_count) {
+            fprintf(stderr,
+                    "BRIDGE[%d]: invalid slots local=%d wan=%d\n",
+                    i, bridge->local_slot, bridge->wan_slot);
+            return -1;
+        }
     }
 
     return 0;
@@ -274,11 +278,11 @@ struct pol_in_match {
 };
 _Static_assert(sizeof(struct pol_in_match) == 32, "pol_in_match packing");
 
-static struct pol_in_match s_pol_in[MAX_PROFILES][MAX_CRYPTO_POLICIES];
-static int s_pol_in_n[MAX_PROFILES];
-static uint8_t s_pol_in_any[MAX_PROFILES][256];
-static int16_t s_pol_in_head[MAX_PROFILES][256];
-static uint8_t s_pol_in_has_negate[MAX_PROFILES][256];
+static struct pol_in_match s_pol_in[NE_PROFILE_SLOTS][MAX_CRYPTO_POLICIES];
+static int s_pol_in_n[NE_PROFILE_SLOTS];
+static uint8_t s_pol_in_any[NE_PROFILE_SLOTS][256];
+static int16_t s_pol_in_head[NE_PROFILE_SLOTS][256];
+static uint8_t s_pol_in_has_negate[NE_PROFILE_SLOTS][256];
 
 static void pol_in_port_range(int from, int to, uint16_t *lo, uint16_t *hi)
 {
@@ -343,15 +347,10 @@ void config_refresh_policy_in_table(struct app_config *cfg)
     memset(s_pol_in_has_negate, 0, sizeof(s_pol_in_has_negate));
     if (!cfg)
         return;
-    if (cfg->profile_count > 0) {
-        struct profile_config *p = &cfg->profiles[0];
+    if (cfg->enabled) {
         int n = 0;
 
-        for (int i = 0; i < p->policy_count; i++) {
-            int poli = p->policy_indices[i];
-
-            if (poli < 0 || poli >= cfg->policy_count)
-                continue;
+        for (int poli = 0; poli < cfg->policy_count; poli++) {
             if (cfg->policies[poli].action != POLICY_ACTION_ENCRYPT_L2)
                 continue;
             if (crypto_policy_is_catchall(&cfg->policies[poli]))
@@ -371,11 +370,12 @@ void config_refresh_policy_in_table(struct app_config *cfg)
         s_pol_in_n[0] = n;
         fprintf(stderr,
                 "[CRYPTO-GUARD] profile %d (%s) WAN IN 5-tuple gate %s (%d compact rules)\n",
-                p->id, p->name, "ON (exact wire policy)", n);
+                cfg->profile_id, cfg->profile_name,
+                "ON (exact wire policy)", n);
     }
 }
 
-int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
+int config_policy_in_ok(const struct app_config *cfg,
                         uint8_t wire_policy_id,
                         uint32_t src_ip, uint32_t dst_ip,
                         uint16_t src_port, uint16_t dst_port,
@@ -393,16 +393,15 @@ int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
     int dport_ok = 0;
     int proto_ok = 0;
 
-    if (!cfg || profile_idx < 0 || profile_idx >= cfg->profile_count ||
-        profile_idx >= MAX_PROFILES)
+    if (!cfg || !cfg->enabled)
         return 0;
-    if (s_pol_in_any[profile_idx][wire_policy_id])
+    if (s_pol_in_any[0][wire_policy_id])
         return 1;
 
-    n = s_pol_in_n[profile_idx];
-    tbl = s_pol_in[profile_idx];
-    if (!s_pol_in_has_negate[profile_idx][wire_policy_id]) {
-        for (int i = s_pol_in_head[profile_idx][wire_policy_id];
+    n = s_pol_in_n[0];
+    tbl = s_pol_in[0];
+    if (!s_pol_in_has_negate[0][wire_policy_id]) {
+        for (int i = s_pol_in_head[0][wire_policy_id];
              i >= 0 && i < n; i = tbl[i].next) {
             const struct pol_in_match *e = &tbl[i];
             int entry_proto_ok;
@@ -421,7 +420,7 @@ int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
         }
         return 0;
     }
-    for (int i = s_pol_in_head[profile_idx][wire_policy_id];
+    for (int i = s_pol_in_head[0][wire_policy_id];
          i >= 0 && i < n; i = tbl[i].next) {
         const struct pol_in_match *e = &tbl[i];
         int src_in;
@@ -471,14 +470,12 @@ static int policy_port_contains(int from, int to, uint16_t port)
 /* All expanded entries with one db_id form one UI policy. Address/port lists
  * are OR groups; negated address items must all be absent (AND of NOTs). */
 static int crypto_policy_group_match(const struct app_config *cfg,
-                                     const struct profile_config *p,
                                      int first, int *next,
                                      uint32_t src_ip, uint32_t dst_ip,
                                      uint16_t src_port, uint16_t dst_port,
                                      uint8_t protocol)
 {
-    int first_pi = p->policy_indices[first];
-    const struct crypto_policy *base = &cfg->policies[first_pi];
+    const struct crypto_policy *base = &cfg->policies[first];
     int src_positive_seen = 0;
     int dst_positive_seen = 0;
     int src_positive_ok = 0;
@@ -497,8 +494,8 @@ static int crypto_policy_group_match(const struct app_config *cfg,
         proto_ok = base->protocol == POLICY_PROTO_ANY ||
             base->protocol == protocol;
 
-    for (j = first; j < p->policy_count; j++) {
-        int pi = p->policy_indices[j];
+    for (j = first; j < cfg->policy_count; j++) {
+        int pi = j;
         const struct crypto_policy *cp;
         int src_in;
         int dst_in;
@@ -553,21 +550,20 @@ static int crypto_policy_group_match(const struct app_config *cfg,
         sport_ok && dport_ok;
 }
 
-const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, int profile_idx,
+const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg,
                                                         uint32_t src_ip, uint32_t dst_ip,
                                                         uint16_t src_port, uint16_t dst_port,
                                                         uint8_t protocol)
 {
-    if (!cfg || profile_idx < 0 || profile_idx >= cfg->profile_count)
+    if (!cfg || !cfg->enabled)
         return NULL;
 
-    const struct profile_config *p = &cfg->profiles[profile_idx];
     const struct crypto_policy *best = NULL;
     int best_priority = 0x7fffffff;
     int best_id = 0x7fffffff;
 
-    for (int i = 0; i < p->policy_count;) {
-        int pi = p->policy_indices[i];
+    for (int i = 0; i < cfg->policy_count;) {
+        int pi = i;
         int next = i + 1;
 
         if (pi < 0 || pi >= cfg->policy_count) {
@@ -576,7 +572,7 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
         }
 
         const struct crypto_policy *cp = &cfg->policies[pi];
-        if (!crypto_policy_group_match(cfg, p, i, &next,
+        if (!crypto_policy_group_match(cfg, i, &next,
                                        src_ip, dst_ip, src_port, dst_port,
                                        protocol)) {
             i = next;

@@ -42,7 +42,7 @@ struct opt_table {
     struct opt_entry entries[OPT_FRAG_TABLE_SIZE];
 };
 
-static struct opt_table *g_tables[MAX_PROFILES][NE_CRYPTO_WORKERS];
+static struct opt_table *g_tables[NE_PROFILE_SLOTS][NE_CRYPTO_WORKERS];
 
 void crypto_l2_pqc_bind_pair(struct ne_pair *p)
 {
@@ -290,7 +290,7 @@ static struct opt_table *opt_table(int profile_slot, int worker_idx, int create)
 {
     struct opt_table *t;
 
-    if (profile_slot < 0 || profile_slot >= MAX_PROFILES)
+    if (profile_slot < 0 || profile_slot >= NE_PROFILE_SLOTS)
         profile_slot = 0;
     if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
         worker_idx = 0;
@@ -1207,7 +1207,7 @@ enum l2_icmp_kind {
 static const uint8_t l2_icmp_marker[L2_ICMP_MARKER_SIZE] = {
     0x5Bu, 0x49u, 0x43u, 0x01u
 };
-static struct opt_table *g_icmp_tables[MAX_PROFILES][NE_CRYPTO_WORKERS];
+static struct opt_table *g_icmp_tables[NE_PROFILE_SLOTS][NE_CRYPTO_WORKERS];
 static atomic_uint_fast64_t g_icmp_datagram_clock = ATOMIC_VAR_INIT(1u);
 
 static struct opt_table *icmp_opt_table(int profile_slot, int worker_idx,
@@ -1215,7 +1215,7 @@ static struct opt_table *icmp_opt_table(int profile_slot, int worker_idx,
 {
     struct opt_table *t;
 
-    if (profile_slot < 0 || profile_slot >= MAX_PROFILES)
+    if (profile_slot < 0 || profile_slot >= NE_PROFILE_SLOTS)
         profile_slot = 0;
     if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
         worker_idx = 0;

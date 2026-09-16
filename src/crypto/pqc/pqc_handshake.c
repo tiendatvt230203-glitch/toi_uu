@@ -2159,12 +2159,10 @@ int sig_pqc_handshake_start(int profile_id, const char *wan_ifname, const char *
 
 void pqc_handshake_start_all_profiles(struct app_config *cfg) {
     if (!cfg) return;
-    for (int p_idx = 0; p_idx < cfg->profile_count; p_idx++) {
-        const struct profile_config *p = &cfg->profiles[p_idx];
+    {
         bool has_pqc_policy = false;
 
-        for (int i = 0; i < p->policy_count; i++) {
-            int pol_idx = p->policy_indices[i];
+        for (int pol_idx = 0; pol_idx < cfg->policy_count; pol_idx++) {
             if (pol_idx >= 0 && pol_idx < cfg->policy_count) {
                 if (cfg->policies[pol_idx].action == POLICY_ACTION_ENCRYPT_L2) {
                     has_pqc_policy = true;
@@ -2174,8 +2172,9 @@ void pqc_handshake_start_all_profiles(struct app_config *cfg) {
         }
 
         if (has_pqc_policy) {
-            fprintf(stderr, "[PQC-HS] Starting Handshake for Profile %d using tunnel configuration\n", p->id);
-            sig_pqc_handshake_start(p->id, "", "");
+            fprintf(stderr, "[PQC-HS] Starting Handshake for Profile %d using tunnel configuration\n",
+                    cfg->profile_id);
+            sig_pqc_handshake_start(cfg->profile_id, "", "");
         }
     }
 }
@@ -3013,11 +3012,9 @@ int sig_pqc_trigger_retry_with_info(int policy_id, char *out_info, size_t out_ma
     }
 }
 
-void sig_pqc_load_and_bind_policy(void *conn_ptr, const void *cfg_ptr, int profile_idx, int db_policy_id, int profile_id) {
+void sig_pqc_load_and_bind_policy(void *conn_ptr, int db_policy_id,
+                                  int profile_id) {
     PGconn *conn = (PGconn *)conn_ptr;
-    const struct app_config *cfg = (const struct app_config *)cfg_ptr;
-    (void)profile_idx;
-    (void)cfg;
     fprintf(stderr, "[DB-PQC-DBG] ENTER load_and_bind_policy: policy=%d profile=%d conn_status=%s\n",
             db_policy_id, profile_id,
             conn ? PQstatus(conn) == CONNECTION_OK ? "OK" : "BAD" : "NULL");

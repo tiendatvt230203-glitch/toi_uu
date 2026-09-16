@@ -41,15 +41,9 @@ DB_OBJ = $(DB_SRC:.c=.o)
 BPF_OBJ = $(LIB_DIR)/lan.o \
           $(LIB_DIR)/wan.o
 
-.PHONY: all clean dirs test-reorder
+.PHONY: all clean dirs
 
 all: dirs $(BPF_OBJ) $(TARGET)
-
-test-reorder:
-	$(CC) $(CFLAGS) tests/reorder_bond_test.c \
-		src/core/dataplane/udp_reorder.c \
-		src/core/dataplane/tcp_bond_reorder.c -o /tmp/ne1500-reorder-bond-test -lpthread
-	/tmp/ne1500-reorder-bond-test
 
 $(TARGET): $(APP_OBJ) $(DB_OBJ)
 	$(CC) -o $@ $(APP_OBJ) $(DB_OBJ) $(LDFLAGS)

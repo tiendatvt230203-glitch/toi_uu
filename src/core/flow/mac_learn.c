@@ -60,12 +60,11 @@ static const char *mac_bridge_for_lan_ifname(const struct forwarder *fwd,
     }
     if (local_idx < 0)
         return "-";
-    if (fwd->cfg->profile_count > 0) {
-        const struct profile_config *p = &fwd->cfg->profiles[0];
-
-        for (int bi = 0; bi < p->bridge_count; bi++) {
-            if (p->bridges[bi].local_idx == local_idx && p->bridges[bi].ifname[0])
-                return p->bridges[bi].ifname;
+    if (fwd->cfg->enabled) {
+        for (int bi = 0; bi < fwd->cfg->bridge_count; bi++) {
+            if (fwd->cfg->bridges[bi].local_slot == local_idx &&
+                fwd->cfg->bridges[bi].ifname[0])
+                return fwd->cfg->bridges[bi].ifname;
         }
     }
     return "-";
@@ -128,13 +127,11 @@ void mac_learn_log_runtime_table(struct forwarder *fwd, const struct app_config 
                 continue;
             if (fwd)
                 br = mac_bridge_for_lan_ifname(fwd, ifname);
-            else if (cfg->profile_count > 0) {
-                const struct profile_config *p = &cfg->profiles[0];
-
-                for (int bi = 0; bi < p->bridge_count; bi++) {
-                    if (p->bridges[bi].local_idx == li &&
-                        p->bridges[bi].ifname[0]) {
-                        br = p->bridges[bi].ifname;
+            else if (cfg->enabled) {
+                for (int bi = 0; bi < cfg->bridge_count; bi++) {
+                    if (cfg->bridges[bi].local_slot == li &&
+                        cfg->bridges[bi].ifname[0]) {
+                        br = cfg->bridges[bi].ifname;
                         break;
                     }
                 }
@@ -211,13 +208,12 @@ void mac_learn_log_runtime_table(struct forwarder *fwd, const struct app_config 
             if (!ifname[0] || !cfg->wans[i].dataplane)
                 continue;
             wan_dp = config_wan_cfg_to_dp(cfg, i);
-            if (cfg->profile_count > 0) {
-                const struct profile_config *p = &cfg->profiles[0];
-
-                for (int bi = 0; bi < p->bridge_count; bi++) {
-                    if (p->bridges[bi].wan_dp == wan_dp &&
-                        p->bridges[bi].ifname[0]) {
-                        br = p->bridges[bi].ifname;
+            if (cfg->enabled) {
+                for (int bi = 0; bi < cfg->bridge_count; bi++) {
+                    if (config_wan_cfg_to_dp(cfg,
+                            cfg->bridges[bi].wan_slot) == wan_dp &&
+                        cfg->bridges[bi].ifname[0]) {
+                        br = cfg->bridges[bi].ifname;
                         break;
                     }
                 }
@@ -1041,22 +1037,19 @@ int mac_fwd_local_for_cfg_idx(const struct forwarder *fwd, int cfg_li)
 
 int mac_fwd_local_for_wan_dp(struct forwarder *fwd, int profile_pi, int wan_dp)
 {
-    const struct profile_config *prof;
     char ifname[IF_NAMESIZE];
 
-    if (!fwd || !fwd->cfg || profile_pi < 0 || profile_pi >= fwd->cfg->profile_count)
-        return -1;
-    prof = &fwd->cfg->profiles[profile_pi];
-    if (!prof->enabled)
+    if (!fwd || !fwd->cfg || profile_pi != 0 || !fwd->cfg->enabled)
         return -1;
 
     ifname[0] = '\0';
-    for (int i = 0; i < prof->bridge_count; i++) {
+    for (int i = 0; i < fwd->cfg->bridge_count; i++) {
         int ci;
 
-        if (prof->bridges[i].wan_dp != wan_dp)
+        if (config_wan_cfg_to_dp(fwd->cfg,
+                fwd->cfg->bridges[i].wan_slot) != wan_dp)
             continue;
-        ci = prof->bridges[i].local_idx;
+        ci = fwd->cfg->bridges[i].local_slot;
         if (ci < 0 || ci >= fwd->cfg->local_count)
             continue;
         if (!fwd->cfg->locals[ci].ifname[0])
