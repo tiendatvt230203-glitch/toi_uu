@@ -1,5 +1,5 @@
 #include "db_runtime.h"
-#include "../../inc/crypto/pqc_handshake.h"
+#include "pqc_handshake.h"
 
 #include "db_config.h"
 #include "db_env.h"

@@ -1,7 +1,7 @@
 CC     = gcc
 CLANG  = clang
 
-CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Isrc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
+CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/pqc -Isrc/db -I../include -Isrc/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
           ./lib/libxdp.so.1 -lpq ./lib/libscrypt.so
 
@@ -11,7 +11,7 @@ KERNEL_HEADERS = /usr/include
 LIB_DIR = lib
 TARGET  = network-encryptor
 
-PQC_SRCS = $(wildcard src/crypto/pqc/*.c)
+PQC_SRCS = $(wildcard src/pqc/*.c)
 
 CORE_SRCS = $(wildcard src/core/runtime/*.c) \
             $(wildcard src/core/profile/*.c) \
@@ -20,11 +20,8 @@ CORE_SRCS = $(wildcard src/core/runtime/*.c) \
             $(wildcard src/core/crypto/*.c) \
             $(wildcard src/core/wan/*.c)
 
-CRYPTO_COMMON_SRCS = $(wildcard src/crypto/common/*.c)
-
 APP_SRC = main.c \
           $(CORE_SRCS) \
-          $(CRYPTO_COMMON_SRCS) \
           $(PQC_SRCS)
 APP_OBJ = $(APP_SRC:.c=.o)
 
@@ -50,8 +47,8 @@ $(TARGET): $(APP_OBJ) $(DB_OBJ)
 
 
 $(LIB_DIR)/%.o: bpf/%.c
-	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I./include -c $< -o $@
+	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I../include -c $< -o $@
 
 clean:
-	rm -rf network-encryptor src/*.o src/core/*/*.o src/crypto/common/*.o \
-		src/crypto/pqc/*.o src/db/*.o *.o $(BPF_OBJ)
+	rm -rf network-encryptor src/*.o src/core/*/*.o src/pqc/*.o \
+		src/db/*.o *.o $(BPF_OBJ)

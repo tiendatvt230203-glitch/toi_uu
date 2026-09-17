@@ -11,8 +11,8 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include "../../inc/crypto/pqc_handshake.h"
-#include "../crypto/pqc/include/pqc_vault.h"
+#include "pqc_handshake.h"
+#include "pqc_vault.h"
 
 static int db_load_local_pqc_identity(const char *fingerprint,
                                       char *private_key, size_t private_size,
