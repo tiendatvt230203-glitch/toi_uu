@@ -2,13 +2,12 @@
 #include "../../../inc/core/dataplane/dataplane_util.h"
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 
-#include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/crypto_option.h"
 #include "../../../inc/crypto/packet_crypto.h"
 
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/iface/interface.h"
-#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/forwarder/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
 #include "../../../inc/core/dataplane/tcp_bond_reorder.h"
@@ -35,9 +34,9 @@ static int wan_l2_is_udp_tagged(const uint8_t *pkt, uint32_t len)
 {
     int mark_off;
 
-    if (!pkt || !crypto_eth_l2_has_marker(pkt, len))
+    if (!pkt || !crypto_l2_pqc_is_wire(pkt, len))
         return 0;
-    mark_off = crypto_eth_l2_frag_magic_off(pkt, len, PACKET_CRYPTO_NONCE_BYTES);
+    mark_off = crypto_l2_pqc_frag_tag_offset(pkt, len, PACKET_CRYPTO_NONCE_BYTES);
     if (mark_off < 0)
         return 0;
     if (len < (uint32_t)mark_off + WAN_L2_UDP_MARKER_LEN +
@@ -67,12 +66,22 @@ static const struct crypto_policy *fwd_policy_by_wire_id(struct forwarder *fwd, 
 
 static int wan_l2_plain_ipv4(const uint8_t *pkt, uint32_t len)
 {
-    return crypto_pkt_is_ipv4(pkt, len);
+    uint16_t ethertype;
+
+    if (!pkt || len < 14u)
+        return 0;
+    ethertype = ((uint16_t)pkt[12] << 8) | pkt[13];
+    if (ethertype == 0x8100u) {
+        if (len < 18u)
+            return 0;
+        ethertype = ((uint16_t)pkt[16] << 8) | pkt[17];
+    }
+    return ethertype == 0x0800u;
 }
 
 static int wan_l2_plain_ok(const uint8_t *pkt, uint32_t len)
 {
-    return crypto_pkt_is_ipv4(pkt, len) || crypto_pkt_is_arp(pkt, len);
+    return wan_l2_plain_ipv4(pkt, len) || arp_bridge_is_packet(pkt, len);
 }
 
 /* Encrypted NE wire: L2 PQC marker / UDP frag — not plain bypass. */
@@ -80,7 +89,7 @@ static int wan_wire_is_encrypted(struct forwarder *fwd, const uint8_t *pkt, uint
 {
     if (!pkt || !fwd || !fwd->cfg)
         return 0;
-    if (fwd_crypto_has_l2_marker(pkt, len) || crypto_eth_l2_has_marker(pkt, len))
+    if (fwd_crypto_has_l2_marker(pkt, len) || crypto_l2_pqc_is_wire(pkt, len))
         return 1;
     if (wan_l2_is_udp_tagged(pkt, len))
         return 1;
@@ -95,14 +104,14 @@ static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
     if (!pkt || !len)
         return 0;
     /* Caller has already classified this as encrypted L2 wire. */
-    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_id) != 0)
+    if (crypto_l2_pqc_read_policy_id(pkt, *len, &wire_id) != 0)
         return 0;
     ctx = fwd_crypto_ctx_for_wire_id(wire_id);
     if (!ctx)
         return -1;
 
     if (crypto_option_decrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_TCP, ctx, pkt, len) == 0 &&
-        crypto_pkt_is_ipv4(pkt, *len))
+        wan_l2_plain_ipv4(pkt, *len))
         return 0;
     return -1;
 }
@@ -143,7 +152,7 @@ static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len
     if (!wan_l2_is_udp_tagged(pkt, *len))
         return 0;
 
-    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_pol) != 0)
+    if (crypto_l2_pqc_read_policy_id(pkt, *len, &wire_pol) != 0)
         return 0;
 
     if (!fwd_policy_by_wire_id(fwd, wire_pol))
@@ -217,7 +226,7 @@ static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
                 len = orig_len;
                 if (crypto_option_is_fragment(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
                                               fwd->cfg, pkt, len, &pid, &fidx)) {
-                    if (crypto_eth_l2_read_policy_id(pkt, len, &wire_pol) != 0)
+                    if (crypto_l2_pqc_read_policy_id(pkt, len, &wire_pol) != 0)
                         return -1;
                     if (reassemble_l2(fwd, pkt, &len, wire_pol, job->addr, &pending) != 0)
                         return -1;
@@ -338,8 +347,8 @@ static int wan_profile_pi(struct forwarder *fwd, const uint8_t *pkt, uint32_t le
     if (!fwd || !pkt || !fwd->cfg || !wire_policy_id)
         return -1;
     *wire_policy_id = 0;
-    if (fwd_crypto_has_l2_marker(pkt, len) || crypto_eth_l2_has_marker(pkt, len)) {
-        if (crypto_eth_l2_read_policy_id(pkt, len, wire_policy_id) != 0)
+    if (fwd_crypto_has_l2_marker(pkt, len) || crypto_l2_pqc_is_wire(pkt, len)) {
+        if (crypto_l2_pqc_read_policy_id(pkt, len, wire_policy_id) != 0)
             return -1;
         return profile_pi_for_wire_policy(fwd, *wire_policy_id);
     }
@@ -413,7 +422,7 @@ int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t 
     if (!fwd || !pkt || !fwd->cfg)
         return 0;
     /* ARP (plain or NE arp-marker) stays on crypto workers. */
-    if (crypto_eth_l2_has_arp_marker(pkt, len) || dp_pkt_is_arp(pkt, len))
+    if (crypto_l2_pqc_is_arp_wire(pkt, len) || arp_bridge_is_packet(pkt, len))
         return 1;
     if (!fwd->cfg->crypto_enabled)
         return 0;
@@ -434,7 +443,7 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     if (job.len < 14u || job.len > NE_FRAME)
         goto drop;
 
-    if (crypto_eth_l2_has_arp_marker(pkt, job.len) || dp_pkt_is_arp(pkt, job.len)) {
+    if (crypto_l2_pqc_is_arp_wire(pkt, job.len) || arp_bridge_is_packet(pkt, job.len)) {
         int wan_dp = job.wan_idx < fwd->wan_count ? (int)job.wan_idx : -1;
         int bridged = -1;
 
@@ -539,9 +548,9 @@ static int wan_l2_is_icmp_fragment(const uint8_t *pkt, uint32_t len)
 {
     int marker_off;
 
-    if (!pkt || !crypto_eth_l2_has_marker(pkt, len))
+    if (!pkt || !crypto_l2_pqc_is_wire(pkt, len))
         return 0;
-    marker_off = crypto_eth_l2_frag_magic_off(pkt, len,
+    marker_off = crypto_l2_pqc_frag_tag_offset(pkt, len,
                                               PACKET_CRYPTO_NONCE_BYTES);
     if (marker_off < 0 ||
         len < (uint32_t)marker_off + WAN_L2_ICMP_MARKER_LEN +
@@ -589,7 +598,7 @@ static int wan_try_l2_pqc_icmp(struct forwarder *fwd, uint8_t *pkt,
 
     if (!wan_l2_is_icmp_fragment(pkt, *len))
         return 0;
-    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_policy_id) != 0 ||
+    if (crypto_l2_pqc_read_policy_id(pkt, *len, &wire_policy_id) != 0 ||
         !fwd_policy_by_wire_id(fwd, wire_policy_id) ||
         !fwd_crypto_ctx_for_wire_id(wire_policy_id))
         return 0;

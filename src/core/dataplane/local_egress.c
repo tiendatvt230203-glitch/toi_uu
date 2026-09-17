@@ -4,7 +4,6 @@
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 
 #include "../../../inc/crypto/crypto_option.h"
-#include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/packet_crypto.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
@@ -14,7 +13,7 @@
 #include "../../../inc/core/dataplane/tcp_bond_reorder.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
 #include "../../../inc/core/failover/wan_failover.h"
-#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/forwarder/mac_learn.h"
 
 #include <netinet/in.h>
 #include <string.h>
@@ -154,7 +153,7 @@ int dataplane_local_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_
     if (!fwd || !fwd->cfg || !pkt)
         return 0;
     /* ARP uses its own fixed-key path on crypto workers — not bypass. */
-    if (dp_pkt_is_arp(pkt, len))
+    if (arp_bridge_is_packet(pkt, len))
         return 1;
     if (!fwd->cfg->crypto_enabled)
         return 0;
@@ -190,7 +189,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (!fwd || !pkt)
         goto drop;
 
-    if (dp_pkt_is_arp(pkt, job.len)) {
+    if (arp_bridge_is_packet(pkt, job.len)) {
         /* ARP: bridge path only — học MAC trong arp_bridge_from_local (client local). */
         if (arp_bridge_from_local(fwd, &job, pkt, li, NULL) == 0)
             return;
@@ -233,9 +232,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
 
     if (proto == IPPROTO_TCP && (tcp_flags & 0x02u)) {
-        (void)crypto_tcp_clamp_mss_l3(pkt, job.len, l3_off,
-                                      crypto_option_get_mtu(),
-                                      crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
+        (void)dp_tcp_bond_clamp_mss(pkt, job.len, l3_off);
     }
 
     pi = (int)(cp - fwd->cfg->policies);

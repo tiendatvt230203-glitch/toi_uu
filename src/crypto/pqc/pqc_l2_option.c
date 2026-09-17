@@ -1,12 +1,11 @@
 #define _POSIX_C_SOURCE 199309L
 
 #include "../../../inc/crypto/crypto_option.h"
-#include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/util/cpu_map.h"
 #include "../../../inc/core/dataplane/tcp_bond_reorder.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
-#include "../../options/common/opt_no_frag_ops.h"
+#include "../options/common/opt_no_frag_ops.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -14,13 +13,172 @@
 #include <netinet/in.h>
 #include <time.h>
 
+#define ETH_L2_HDR_MAX          18
+#define ETH_P_8021Q             0x8100u
+#define ETH_P_IP                0x0800u
+#define ETH_P_ARP               0x0806u
 #define MIN_ETH_PKT             (ETH_HEADER_SIZE + 8)
 #define unlikely(x)             __builtin_expect(!!(x), 0)
+
+static uint16_t l2_read_ethertype(const uint8_t *packet, int offset)
+{
+    return (uint16_t)(((uint16_t)packet[offset] << 8) | packet[offset + 1]);
+}
+
+static int l2_ethertype_offset(const uint8_t *packet, size_t packet_len)
+{
+    uint16_t ethertype;
+
+    if (!packet || packet_len < ETH_HEADER_SIZE)
+        return -1;
+    ethertype = l2_read_ethertype(packet, 12);
+    if (ethertype == ETH_P_IP || ethertype == ETH_P_ARP ||
+        ethertype == CRYPTO_L2_PQC_ETHERTYPE ||
+        ethertype == CRYPTO_L2_PQC_UDP_ETHERTYPE ||
+        ethertype == CRYPTO_L2_PQC_ARP_ETHERTYPE)
+        return 12;
+    if (ethertype != ETH_P_8021Q || packet_len < ETH_L2_HDR_MAX)
+        return -1;
+    ethertype = l2_read_ethertype(packet, 16);
+    if (ethertype == ETH_P_IP || ethertype == ETH_P_ARP ||
+        ethertype == CRYPTO_L2_PQC_ETHERTYPE ||
+        ethertype == CRYPTO_L2_PQC_UDP_ETHERTYPE ||
+        ethertype == CRYPTO_L2_PQC_ARP_ETHERTYPE)
+        return 16;
+    return -1;
+}
+
+static int l2_ipv4_offset(const uint8_t *packet, size_t packet_len)
+{
+    int ethertype_offset = l2_ethertype_offset(packet, packet_len);
+
+    if (ethertype_offset < 0 ||
+        l2_read_ethertype(packet, ethertype_offset) != ETH_P_IP ||
+        packet_len < (size_t)(ethertype_offset + 2 + 20))
+        return -1;
+    return ethertype_offset + 2;
+}
+
+static int l2_arp_offset(const uint8_t *packet, size_t packet_len)
+{
+    int ethertype_offset = l2_ethertype_offset(packet, packet_len);
+
+    if (ethertype_offset < 0 ||
+        l2_read_ethertype(packet, ethertype_offset) != ETH_P_ARP ||
+        packet_len < (size_t)(ethertype_offset + 2 + 28))
+        return -1;
+    return ethertype_offset + 2;
+}
+
+static int l2_is_ipv4(const uint8_t *packet, size_t packet_len)
+{
+    return l2_ipv4_offset(packet, packet_len) >= 0;
+}
+
+static int l2_is_arp(const uint8_t *packet, size_t packet_len)
+{
+    return l2_arp_offset(packet, packet_len) >= 0;
+}
+
+static void l2_set_ethertype(uint8_t *packet, int offset, uint16_t ethertype)
+{
+    if (!packet || offset < 0)
+        return;
+    packet[offset] = (uint8_t)(ethertype >> 8);
+    packet[offset + 1] = (uint8_t)ethertype;
+}
+
+static void l2_set_ipv4_ethertype(uint8_t *packet, int offset)
+{
+    l2_set_ethertype(packet, offset, ETH_P_IP);
+}
+
+static void l2_set_arp_ethertype(uint8_t *packet, int offset)
+{
+    l2_set_ethertype(packet, offset, ETH_P_ARP);
+}
+
+int crypto_l2_pqc_is_wire(const uint8_t *packet, size_t packet_len)
+{
+    int offset = l2_ethertype_offset(packet, packet_len);
+    uint16_t ethertype;
+
+    if (offset < 0)
+        return 0;
+    ethertype = l2_read_ethertype(packet, offset);
+    return ethertype == CRYPTO_L2_PQC_ETHERTYPE ||
+           ethertype == CRYPTO_L2_PQC_UDP_ETHERTYPE;
+}
+
+int crypto_l2_pqc_is_arp_wire(const uint8_t *packet, size_t packet_len)
+{
+    int offset = l2_ethertype_offset(packet, packet_len);
+
+    return offset >= 0 &&
+           l2_read_ethertype(packet, offset) == CRYPTO_L2_PQC_ARP_ETHERTYPE;
+}
+
+static int l2_policy_offset(const uint8_t *packet, size_t packet_len)
+{
+    int offset = l2_ethertype_offset(packet, packet_len);
+
+    if (offset < 0 || packet_len < (size_t)(offset + 3))
+        return -1;
+    return offset + 2;
+}
+
+int crypto_l2_pqc_read_policy_id(const uint8_t *packet, uint32_t packet_len,
+                                 uint8_t *policy_id_out)
+{
+    int offset = l2_policy_offset(packet, packet_len);
+
+    if (offset < 0 || !policy_id_out)
+        return -1;
+    *policy_id_out = packet[offset];
+    return 0;
+}
+
+static int l2_core_id_offset(const uint8_t *packet, size_t packet_len)
+{
+    int offset = l2_policy_offset(packet, packet_len);
+
+    return offset < 0 ? -1 : offset + 1;
+}
+
+int crypto_l2_pqc_frag_tag_offset(const uint8_t *packet, size_t packet_len,
+                                  int nonce_size)
+{
+    int offset = l2_core_id_offset(packet, packet_len);
+
+    if (offset < 0 || nonce_size < 0 ||
+        packet_len < (size_t)(offset + 1 + nonce_size))
+        return -1;
+    return offset + 1 + nonce_size;
+}
+
+int crypto_l2_pqc_read_worker_idx(const uint8_t *packet, uint32_t packet_len,
+                                  uint8_t *worker_idx_out)
+{
+    int offset;
+
+    if (!packet || !worker_idx_out ||
+        !crypto_l2_pqc_is_wire(packet, packet_len))
+        return -1;
+    offset = l2_core_id_offset(packet, packet_len);
+    if (offset < 0)
+        return -1;
+    *worker_idx_out = packet[offset];
+    return 0;
+}
 
 /* ===================== L2 PQC ===================== */
 
 /* wire — local to this option */
 #define OPT_FAKE_ETHERTYPE  0x104Au
+
+/* PQC L2 fragment reassembly (UDP and ICMP), not TCP/UDP bond ordering. */
+#define OPT_FRAG_TABLE_SIZE  4096
+#define OPT_FRAG_TIMEOUT_NS  (200ULL * 1000000ULL)
 
 struct opt_entry {
     uint32_t epoch;
@@ -43,7 +201,6 @@ struct opt_table {
     struct opt_entry entries[OPT_FRAG_TABLE_SIZE];
 };
 
-static struct opt_table *g_tables[NE_PROFILE_SLOTS][NE_CRYPTO_WORKERS];
 
 void crypto_l2_pqc_bind_pair(struct ne_pair *p)
 {
@@ -267,7 +424,7 @@ static int opt_emit_join(struct opt_entry *entry, uint8_t frag_index,
     }
     *out_len = eth_len + first_len + second_len;
     if (eth_len >= 2)
-        crypto_eth_set_ipv4_et(out_buf, eth_len - 2);
+        l2_set_ipv4_ethertype(out_buf, eth_len - 2);
     opt_clear_entry(entry);
     return 1;
 }
@@ -285,24 +442,6 @@ static void opt_frag_gc_table(struct opt_table *ft, uint64_t now_ns)
             opt_clear_entry(e);
     }
     ft->gc_cursor = (start + slice) % OPT_FRAG_TABLE_SIZE;
-}
-
-static struct opt_table *opt_table(int profile_slot, int worker_idx, int create)
-{
-    struct opt_table *t;
-
-    if (profile_slot < 0 || profile_slot >= NE_PROFILE_SLOTS)
-        profile_slot = 0;
-    if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
-        worker_idx = 0;
-    t = g_tables[profile_slot][worker_idx];
-    if (!t && create) {
-        t = calloc(1, sizeof(*t));
-        if (!t)
-            return NULL;
-        g_tables[profile_slot][worker_idx] = t;
-    }
-    return t;
 }
 
 static int opt_policy_match(const struct app_config *cfg, int action, uint8_t wire_id)
@@ -357,7 +496,7 @@ static void l2_tcp_marker_write(uint8_t *packet, int off)
 #define L2_NONCE_SIZE           CRYPTO_PQC_NONCE_BYTES
 static int l2_policy_off(const uint8_t *packet, size_t pkt_len)
 {
-    return crypto_eth_l2_policy_off(packet, pkt_len);
+    return l2_policy_offset(packet, pkt_len);
 }
 
 static int l2_core_id_off(const uint8_t *packet, size_t pkt_len)
@@ -408,24 +547,24 @@ static void l2_write_wire_header(uint8_t *packet, int et_off, uint8_t policy_id,
 static int l2_restore_plain_packet(uint8_t *packet, size_t pkt_len,
                                      const uint8_t *payload, size_t payload_len)
 {
-    int et_off = crypto_eth_l2_prefix_len(packet, pkt_len);
+    int et_off = l2_ethertype_offset(packet, pkt_len);
     int l3_off;
     if (et_off < 0)
         return -1;
     l3_off = et_off + 2;
     if (payload_len >= 2 && payload[0] == 0x08 && payload[1] == 0x00) {
-        crypto_eth_set_ipv4_et(packet, et_off);
+        l2_set_ipv4_ethertype(packet, et_off);
         memmove(packet + l3_off, payload + 2, payload_len - 2);
         return l3_off + (int)payload_len - 2;
     }
-    crypto_eth_set_ipv4_et(packet, et_off);
+    l2_set_ipv4_ethertype(packet, et_off);
     memmove(packet + l3_off, payload, payload_len);
     return l3_off + (int)payload_len;
 }
 
 static int l2_wire_prefix_len(const uint8_t *packet, size_t pkt_len)
 {
-    int et_off = crypto_eth_l2_prefix_len(packet, pkt_len);
+    int et_off = l2_ethertype_offset(packet, pkt_len);
     if (et_off < 0)
         return -1;
     return et_off + 2;
@@ -529,8 +668,8 @@ static int l2_do_encrypt_tcp(struct packet_crypto_ctx *ctx, uint8_t *packet,
 static int l2_do_encrypt_udp(struct packet_crypto_ctx *ctx, uint8_t *packet,
                              size_t pkt_len)
 {
-    int l3_off = crypto_eth_ipv4_offset(packet, pkt_len);
-    int et_off = crypto_eth_l2_prefix_len(packet, pkt_len);
+    int l3_off = l2_ipv4_offset(packet, pkt_len);
+    int et_off = l2_ethertype_offset(packet, pkt_len);
     int magic_off;
     int enc_start;
     size_t payload_len;
@@ -607,13 +746,13 @@ static int l2_do_decrypt_tcp(struct packet_crypto_ctx *ctx, uint8_t *packet,
         l2_tcp_read_shim(packet + enc_start, epoch, seq) != 0)
         return -1;
     payload_len = (size_t)dec_len - L2_TCP_SHIM_SIZE;
-    l3_off = crypto_eth_l2_prefix_len(packet, pkt_len);
+    l3_off = l2_ethertype_offset(packet, pkt_len);
     if (l3_off < 0)
         return -1;
     l3_off += 2;
     memmove(packet + l3_off, packet + enc_start + L2_TCP_SHIM_SIZE,
             payload_len);
-    crypto_eth_set_ipv4_et(packet, l3_off - 2);
+    l2_set_ipv4_ethertype(packet, l3_off - 2);
     return l3_off + (int)payload_len;
 }
 
@@ -643,14 +782,14 @@ static int l2_do_decrypt_udp(struct packet_crypto_ctx *ctx, uint8_t *packet,
                          datagram_id) != 0)
         return -1;
     payload_len = (size_t)dec_len - L2_UDP_SHIM_SIZE;
-    l3_off = crypto_eth_l2_prefix_len(packet, pkt_len);
+    l3_off = l2_ethertype_offset(packet, pkt_len);
     if (l3_off < 0)
         return -1;
     l3_off += 2;
     memmove(packet + l3_off, packet + enc_start + L2_UDP_SHIM_SIZE,
             payload_len);
     if (*kind == L2_UDP_KIND_FULL)
-        crypto_eth_set_ipv4_et(packet, l3_off - 2);
+        l2_set_ipv4_ethertype(packet, l3_off - 2);
     return l3_off + (int)payload_len;
 }
 
@@ -664,7 +803,7 @@ static int l2_do_decrypt_udp(struct packet_crypto_ctx *ctx, uint8_t *packet,
 
 static int l2_do_encrypt_arp(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t pkt_len)
 {
-    int arp_off = crypto_eth_arp_offset(packet, pkt_len);
+    int arp_off = l2_arp_offset(packet, pkt_len);
     int et_off;
     int enc_start;
     int new_len = 0;
@@ -695,7 +834,7 @@ static int l2_do_decrypt_arp(struct packet_crypto_ctx *ctx, uint8_t *packet, siz
     int arp_off;
     int dec_len = 0;
 
-    et_off = crypto_eth_inner_et_off(packet, pkt_len);
+    et_off = l2_ethertype_offset(packet, pkt_len);
     if (et_off < 0)
         return -1;
     enc_start = et_off + 2 + ARP_WIRE_HDR_LEN;
@@ -709,7 +848,7 @@ static int l2_do_decrypt_arp(struct packet_crypto_ctx *ctx, uint8_t *packet, siz
         return -1;
     /* Restore ethertype 0x0806 and slide ARP body back. */
     arp_off = et_off + 2;
-    crypto_eth_set_arp_et(packet, et_off);
+    l2_set_arp_ethertype(packet, et_off);
     memmove(packet + arp_off, packet + enc_start, (size_t)dec_len);
     return arp_off + dec_len;
 }
@@ -782,8 +921,8 @@ static int l2_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t p
                     size_t frag0_max, uint32_t *frag0_len,
                     uint8_t *frag1, size_t frag1_max, uint32_t *frag1_len)
 {
-    uint32_t frag_mtu = crypto_option_get_mtu();
-    int l3_off = crypto_eth_ipv4_offset(pkt_data, pkt_len);
+    uint32_t frag_mtu = 1500u;
+    int l3_off = l2_ipv4_offset(pkt_data, pkt_len);
     const uint8_t *eth_hdr;
     const uint8_t *ip_hdr;
     int ip_hdr_len;
@@ -845,12 +984,12 @@ static int l2_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t p
     if (l2_encrypt_fragment_single(ctx, eth_hdr, frag1_plain, half2,
                                    epoch, seq, datagram_id, L2_UDP_KIND_FRAG1,
                                    frag1, frag1_max, frag1_len,
-                                   crypto_eth_l2_prefix_len(eth_hdr, ETH_L2_HDR_MAX)) != 0)
+                                   l2_ethertype_offset(eth_hdr, ETH_L2_HDR_MAX)) != 0)
         return -1;
     if (l2_encrypt_fragment0_inplace(ctx, pkt_data, frag0_plain_len,
                                      epoch, seq, datagram_id,
                                      frag0_max, frag0_len,
-                                     crypto_eth_l2_prefix_len(pkt_data, pkt_len), l3_off) != 0)
+                                     l2_ethertype_offset(pkt_data, pkt_len), l3_off) != 0)
         return -1;
     return 0;
 }
@@ -924,10 +1063,10 @@ static int l2_udp_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
 
     if (unlikely(!ctx || !ctx->initialized || !pkt || *pkt_len < MIN_ETH_PKT))
         return -1;
-    if (!crypto_pkt_is_ipv4(pkt, *pkt_len))
+    if (!l2_is_ipv4(pkt, *pkt_len))
         return 0;
-    l3_off = crypto_eth_ipv4_offset(pkt, *pkt_len);
-    et_off = crypto_eth_l2_prefix_len(pkt, *pkt_len);
+    l3_off = l2_ipv4_offset(pkt, *pkt_len);
+    et_off = l2_ethertype_offset(pkt, *pkt_len);
     if (l3_off < 0 || et_off < 0)
         return -1;
     n = l2_do_encrypt_udp(ctx, pkt, *pkt_len);
@@ -947,11 +1086,11 @@ static int l2_udp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
 
     if (unlikely(!ctx || !ctx->initialized || !pkt))
         return -1;
-    if (!crypto_eth_l2_has_marker(pkt, *pkt_len))
+    if (!crypto_l2_pqc_is_wire(pkt, *pkt_len))
         return 0;
     n = l2_do_decrypt_udp(ctx, pkt, *pkt_len, &epoch, &seq,
                           &datagram_id, &kind);
-    if (n < 0 || kind != L2_UDP_KIND_FULL || !crypto_pkt_is_ipv4(pkt, (size_t)n))
+    if (n < 0 || kind != L2_UDP_KIND_FULL || !l2_is_ipv4(pkt, (size_t)n))
         return -1;
     *pkt_len = (uint32_t)n;
     dp_udp_bond_set_rx_meta(epoch, seq);
@@ -959,7 +1098,7 @@ static int l2_udp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
 }
 static int l2_udp_need_split(uint32_t pkt_len)
 {
-    return (pkt_len + OPT_FRAG_META_LEN) > crypto_option_get_mtu();
+    return (pkt_len + OPT_FRAG_META_LEN) > 1500u;
 }
 
 static int l2_udp_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t pkt_len,
@@ -977,7 +1116,7 @@ static int l2_udp_is_fragment(const struct app_config *cfg, const uint8_t *pkt_d
 
     if (!cfg || !pkt_id || !frag_index)
         return 0;
-    if (!crypto_eth_l2_has_marker(pkt_data, pkt_len))
+    if (!crypto_l2_pqc_is_wire(pkt_data, pkt_len))
         return 0;
     tag_off = l2_frag_magic_off(pkt_data, pkt_len);
     if (tag_off < 0)
@@ -987,7 +1126,7 @@ static int l2_udp_is_fragment(const struct app_config *cfg, const uint8_t *pkt_d
         return 0;
     if (!l2_udp_marker_match(pkt_data, pkt_len, tag_off))
         return 0;
-    if (crypto_eth_l2_read_policy_id(pkt_data, pkt_len, &wire_pol) != 0)
+    if (crypto_l2_pqc_read_policy_id(pkt_data, pkt_len, &wire_pol) != 0)
         return 0;
     if (!opt_policy_match(cfg, POLICY_ACTION_ENCRYPT_L2, wire_pol))
         return 0;
@@ -1017,7 +1156,7 @@ static int l2_udp_reasm(int profile_slot, int worker_idx, struct packet_crypto_c
         return -1;
     *pkt_len = (uint32_t)nd;
     if (kind == L2_UDP_KIND_FULL) {
-        if (!crypto_pkt_is_ipv4(pkt_data, *pkt_len))
+        if (!l2_is_ipv4(pkt_data, *pkt_len))
             return -1;
         if (out_buf != pkt_data)
             memcpy(out_buf, pkt_data, *pkt_len);
@@ -1027,11 +1166,11 @@ static int l2_udp_reasm(int profile_slot, int worker_idx, struct packet_crypto_c
     }
     if (kind > L2_UDP_KIND_FRAG1)
         return -1;
-    struct opt_table *ft = opt_table(profile_slot, worker_idx, 1);
-    if (!ft)
-        return -1;
-    rr = l2_reassemble(ft, ctx->wire_id, pkt_data, *pkt_len,
-                       epoch, datagram_id, seq, kind, out_buf, out_len);
+    (void)profile_slot;
+    rr = dp_udp_fragment_reassemble(worker_idx, ctx->wire_id,
+                                    pkt_data, *pkt_len, epoch,
+                                    datagram_id, seq, kind,
+                                    out_buf, out_len);
     if (rr == 1) {
         *pkt_len = *out_len;
         dp_udp_bond_set_rx_meta(epoch, seq);
@@ -1041,9 +1180,8 @@ static int l2_udp_reasm(int profile_slot, int worker_idx, struct packet_crypto_c
 
 static void l2_udp_frag_gc(int profile_slot, int worker_idx, uint64_t now_ns)
 {
-    struct opt_table *ft = opt_table(profile_slot, worker_idx, 0);
-    if (ft)
-        opt_frag_gc_table(ft, now_ns);
+    (void)profile_slot;
+    dp_udp_fragment_gc(worker_idx, now_ns);
 }
 
 static int l2_ip_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
@@ -1055,7 +1193,7 @@ static int l2_ip_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     if (unlikely(!ctx || !ctx->initialized || !pkt ||
                  *pkt_len < MIN_ETH_PKT))
         return -1;
-    l3_off = crypto_eth_ipv4_offset(pkt, *pkt_len);
+    l3_off = l2_ipv4_offset(pkt, *pkt_len);
     if (l3_off < 0)
         return 0;
     n = l2_do_encrypt(ctx, pkt, *pkt_len, l3_off);
@@ -1074,7 +1212,7 @@ static int l2_tcp_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     if (unlikely(!ctx || !ctx->initialized || !pkt || !pkt_len ||
                  *pkt_len < MIN_ETH_PKT))
         return -1;
-    l3_off = crypto_eth_ipv4_offset(pkt, *pkt_len);
+    l3_off = l2_ipv4_offset(pkt, *pkt_len);
     if (l3_off < 0)
         return 0;
     n = l2_do_encrypt_tcp(ctx, pkt, *pkt_len, l3_off);
@@ -1111,7 +1249,7 @@ static int l2_ip_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
 
     if (unlikely(!ctx || !ctx->initialized || !pkt))
         return -1;
-    if (!crypto_eth_l2_has_marker(pkt, *pkt_len))
+    if (!crypto_l2_pqc_is_wire(pkt, *pkt_len))
         return 0;
     n = l2_do_decrypt(ctx, pkt, *pkt_len);
     if (n < 0)
@@ -1130,13 +1268,13 @@ static int l2_tcp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
 
     if (unlikely(!ctx || !ctx->initialized || !pkt || !pkt_len))
         return -1;
-    if (!crypto_eth_l2_has_marker(pkt, *pkt_len))
+    if (!crypto_l2_pqc_is_wire(pkt, *pkt_len))
         return 0;
     marker_off = l2_enc_start_off(pkt, *pkt_len);
     if (!l2_tcp_marker_match(pkt, *pkt_len, marker_off))
         return l2_ip_decrypt(ctx, pkt, pkt_len);
     n = l2_do_decrypt_tcp(ctx, pkt, *pkt_len, &epoch, &seq);
-    if (n < 0 || !crypto_pkt_is_ipv4(pkt, (size_t)n))
+    if (n < 0 || !l2_is_ipv4(pkt, (size_t)n))
         return -1;
     *pkt_len = (uint32_t)n;
     dp_tcp_bond_set_rx_meta(epoch, seq);
@@ -1151,7 +1289,7 @@ static int l2_arp_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     if (unlikely(!ctx || !ctx->initialized || !pkt ||
                  *pkt_len < MIN_ETH_PKT))
         return -1;
-    if (!crypto_pkt_is_arp(pkt, *pkt_len))
+    if (!l2_is_arp(pkt, *pkt_len))
         return 0;
     n = l2_do_encrypt_arp(ctx, pkt, *pkt_len);
     if (n < 0)
@@ -1167,7 +1305,7 @@ static int l2_arp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
 
     if (unlikely(!ctx || !ctx->initialized || !pkt))
         return -1;
-    if (!crypto_eth_l2_has_arp_marker(pkt, *pkt_len))
+    if (!crypto_l2_pqc_is_arp_wire(pkt, *pkt_len))
         return 0;
     n = l2_do_decrypt_arp(ctx, pkt, *pkt_len);
     if (n < 0)
@@ -1332,8 +1470,8 @@ static int l2_encrypt_icmp_fragment0(struct packet_crypto_ctx *ctx,
 
 static int l2_icmp_need_split(uint32_t pkt_len)
 {
-    return pkt_len + crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC) >
-        crypto_option_get_mtu();
+    return pkt_len + (1u + 1u + PACKET_CRYPTO_NONCE_BYTES + AES_GCM_TAG_SIZE + 13u) >
+        1500u;
 }
 
 static int l2_icmp_split(struct packet_crypto_ctx *ctx,
@@ -1342,9 +1480,9 @@ static int l2_icmp_split(struct packet_crypto_ctx *ctx,
                          uint8_t *frag1, size_t frag1_max,
                          uint32_t *frag1_len)
 {
-    uint32_t frag_mtu = crypto_option_get_mtu();
-    int et_off = crypto_eth_l2_prefix_len(pkt_data, pkt_len);
-    int l3_off = crypto_eth_ipv4_offset(pkt_data, pkt_len);
+    uint32_t frag_mtu = 1500u;
+    int et_off = l2_ethertype_offset(pkt_data, pkt_len);
+    int l3_off = l2_ipv4_offset(pkt_data, pkt_len);
     const uint8_t *ip;
     uint32_t ip_len;
     uint32_t ihl;
@@ -1389,11 +1527,11 @@ static int l2_icmp_is_fragment(const struct app_config *cfg,
     uint8_t wire_policy_id;
 
     if (!cfg || !pkt_data || !pkt_id || !frag_index ||
-        !crypto_eth_l2_has_marker(pkt_data, pkt_len))
+        !crypto_l2_pqc_is_wire(pkt_data, pkt_len))
         return 0;
     marker_off = l2_frag_magic_off(pkt_data, pkt_len);
     if (!l2_icmp_marker_match(pkt_data, pkt_len, marker_off) ||
-        crypto_eth_l2_read_policy_id(pkt_data, pkt_len,
+        crypto_l2_pqc_read_policy_id(pkt_data, pkt_len,
                                      &wire_policy_id) != 0 ||
         !opt_policy_match(cfg, POLICY_ACTION_ENCRYPT_L2, wire_policy_id))
         return 0;
@@ -1435,7 +1573,7 @@ static int l2_icmp_reasm(int profile_slot, int worker_idx,
                           &datagram_id) != 0 ||
         kind > L2_ICMP_KIND_FRAG1)
         return -1;
-    l3_off = crypto_eth_l2_prefix_len(pkt_data, *pkt_len);
+    l3_off = l2_ethertype_offset(pkt_data, *pkt_len);
     if (l3_off < 0)
         return -1;
     l3_off += 2;
@@ -1449,7 +1587,7 @@ static int l2_icmp_reasm(int profile_slot, int worker_idx,
     rr = l2_reassemble(ft, ctx->wire_id, pkt_data, *pkt_len,
                        epoch, datagram_id, 0, kind, out_buf, out_len);
     if (rr == 1) {
-        int ip_off = crypto_eth_ipv4_offset(out_buf, *out_len);
+        int ip_off = l2_ipv4_offset(out_buf, *out_len);
 
         *pkt_len = *out_len;
         if (ip_off < 0 || *out_len < (uint32_t)ip_off + 20u ||

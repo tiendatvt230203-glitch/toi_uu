@@ -10,7 +10,7 @@
 #include "../../../inc/core/util/main_diag.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
-#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/forwarder/mac_learn.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/core/dataplane/tcp_bond_reorder.h"
@@ -29,6 +29,22 @@
 static atomic_int running = 1;
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t tx_maint_tick;
+
+int forwarder_enqueue_packet(struct forwarder *fwd, struct ne_ring *ring,
+                             struct ne_packet *packet)
+{
+    if (!fwd || !ring || !packet ||
+        packet->len > fwd->pair.frame_size ||
+        ne_ring_try_push(ring, packet) != 0) {
+        if (fwd && packet) {
+            ne_dp_stats_mid_ring_drop(1);
+            ne_frame_free(&fwd->pair, packet->addr);
+        }
+        return -1;
+    }
+    ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
+    return 0;
+}
 
 static void dp_maint_tick(struct forwarder *fwd)
 {
@@ -232,35 +248,6 @@ static void init_iface_meta(struct fwd_iface *iface, const char *ifname)
     iface->ifindex = (int)if_nametoindex(ifname);
     strncpy(iface->ifname, ifname, sizeof(iface->ifname) - 1);
     iface->ifname[sizeof(iface->ifname) - 1] = '\0';
-}
-
-static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
-{
-    int sockfd;
-    uint32_t min_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
-
-    if (!cfg)
-        return min_mtu;
-
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0)
-        return min_mtu;
-
-    for (int wi = 0; wi < cfg->wan_count; wi++) {
-        struct ifreq ifr;
-        if (!cfg->wans[wi].dataplane)
-            continue;
-        memset(&ifr, 0, sizeof(ifr));
-        strncpy(ifr.ifr_name, cfg->wans[wi].ifname, IFNAMSIZ - 1);
-        ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-        if (ioctl(sockfd, SIOCGIFMTU, &ifr) != 0)
-            continue;
-        if (ifr.ifr_mtu > 0 && (uint32_t)ifr.ifr_mtu < min_mtu)
-            min_mtu = (uint32_t)ifr.ifr_mtu;
-    }
-
-    close(sockfd);
-    return min_mtu;
 }
 
 static void *local_rx_thread(void *arg)
@@ -556,8 +543,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     if (fwd->wan_count > MAX_INTERFACES)
         fwd->wan_count = MAX_INTERFACES;
 
-    crypto_option_set_mtu(resolve_runtime_frag_mtu(cfg));
-    fprintf(stderr, "[FRAG] runtime MTU set to %u\n", crypto_option_get_mtu());
     ne_dp_stats_init();
     ne_dp_idle_init();
 

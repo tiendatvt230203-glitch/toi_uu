@@ -4,7 +4,7 @@
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/failover/wan_failover.h"
-#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/forwarder/mac_learn.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 
 #include <pthread.h>

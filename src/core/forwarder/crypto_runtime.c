@@ -4,7 +4,6 @@
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 
-#include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/crypto_option.h"
 #include "../../../inc/crypto/traffic_crypto.h"
 #include "../../../inc/crypto/pqc_handshake.h"
@@ -560,9 +559,9 @@ int fwd_crypto_has_l2_marker(const uint8_t *pkt, uint32_t pkt_len)
 {
     uint8_t wire_pol = 0;
 
-    if (!pkt || !crypto_eth_l2_has_marker(pkt, pkt_len))
+    if (!pkt || !crypto_l2_pqc_is_wire(pkt, pkt_len))
         return 0;
-    if (crypto_eth_l2_read_policy_id(pkt, pkt_len, &wire_pol) != 0)
+    if (crypto_l2_pqc_read_policy_id(pkt, pkt_len, &wire_pol) != 0)
         return 0;
     return policy_index_by_wire_id[wire_pol] >= 0;
 }

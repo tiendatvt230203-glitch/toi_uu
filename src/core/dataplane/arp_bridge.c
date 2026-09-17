@@ -5,21 +5,53 @@
 #include "../../../inc/core/dataplane/dataplane_util.h"
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 #include "../../../inc/core/forwarder/forwarder_wan.h"
-#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/forwarder/mac_learn.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
-#include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/crypto/crypto_option.h"
-#include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <stdint.h>
 #include <net/if.h>
 
 #define ARP_DEFAULT_WIRE_ID      250u
 #define ARP_ETH_HDR_LEN          14u
+
+/* CFM publishes WAN state here. ARP owns its own failover choice and never
+ * asks the generic WAN scheduler to choose a backup on its behalf. */
+static atomic_uchar g_arp_wan_down[MAX_INTERFACES];
+
+void arp_bridge_failover_reset(void)
+{
+    for (int i = 0; i < MAX_INTERFACES; i++)
+        atomic_store_explicit(&g_arp_wan_down[i], 0, memory_order_relaxed);
+}
+
+void arp_bridge_link_state_changed(int wan_dp, int is_up)
+{
+    if (wan_dp < 0 || wan_dp >= MAX_INTERFACES)
+        return;
+    atomic_store_explicit(&g_arp_wan_down[wan_dp], is_up ? 0 : 1,
+                          memory_order_release);
+}
+
+int arp_bridge_is_packet(const uint8_t *packet, uint32_t packet_len)
+{
+    uint16_t ethertype;
+
+    if (!packet || packet_len < ARP_ETH_HDR_LEN)
+        return 0;
+    ethertype = ((uint16_t)packet[12] << 8) | packet[13];
+    if (ethertype == 0x8100u) {
+        if (packet_len < 18u)
+            return 0;
+        ethertype = ((uint16_t)packet[16] << 8) | packet[17];
+    }
+    return ethertype == 0x0806u;
+}
 
 /* 1 = mã hóa ARP L2-PQC (key/option riêng), độc lập bảng policy/data crypto.
  * Decrypt vẫn chạy nếu wire có ARP marker (peer vẫn encrypt). */
@@ -211,7 +243,8 @@ static int arp_wan_dp_usable(struct forwarder *fwd, int wan_dp)
         return 0;
     if (fwd_wan_is_stopped(wan_dp))
         return 0;
-    if (wan_failover_dp_excluded(wan_dp))
+    if (atomic_load_explicit(&g_arp_wan_down[wan_dp],
+                             memory_order_acquire))
         return 0;
     return 1;
 }
@@ -466,10 +499,10 @@ static int arp_try_decrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
     if (!fwd || !job || !pkt)
         return -1;
 
-    if (crypto_pkt_is_arp(pkt, job->len))
+    if (arp_bridge_is_packet(pkt, job->len))
         return 0; /* plain ARP — bridge as-is */
 
-    if (!crypto_eth_l2_has_arp_marker(pkt, job->len))
+    if (!crypto_l2_pqc_is_arp_wire(pkt, job->len))
         return -1; /* not ARP wire */
 
     if (arp_crypto_ctx_snapshot(fwd->cfg, profile_idx, &ctx,
@@ -493,7 +526,7 @@ static int arp_try_decrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
                                   &static_ctx, pkt, &len) != 0)
             return -1;
     }
-    if (!crypto_pkt_is_arp(pkt, len))
+    if (!arp_bridge_is_packet(pkt, len))
         return -1;
     job->len = len;
     return 1;

@@ -3,7 +3,7 @@
 
 #include "core/iface/interface.h"
 #include "core/dataplane/crypto_route.h"
-#include "core/flow/mac_learn.h"
+#include "core/forwarder/mac_learn.h"
 
 struct fwd_iface {
     int ifindex;
@@ -60,5 +60,7 @@ void forwarder_stop(void);
 void forwarder_clear_stop(void);
 void forwarder_shutdown_resources(void);
 int forwarder_should_stop(void);
+int forwarder_enqueue_packet(struct forwarder *fwd, struct ne_ring *ring,
+                             struct ne_packet *packet);
 
 #endif

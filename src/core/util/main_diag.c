@@ -5,7 +5,7 @@
 #include "../../../inc/core/util/config.h"
 #include "../../../inc/core/forwarder/forwarder.h"
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
-#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/forwarder/mac_learn.h"
 #include "../../../inc/crypto/packet_crypto.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 

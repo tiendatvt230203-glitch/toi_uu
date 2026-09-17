@@ -2,7 +2,6 @@
 #include "../../../inc/core/iface/interface.h"
 
 #include <netinet/in.h>
-#include <stdatomic.h>
 
 /* ===================== worker bind ===================== */
 
@@ -32,34 +31,6 @@ crypto_proto_class crypto_proto_classify(uint8_t ip_proto)
 }
 
 /* ===================== option router ===================== */
-
-static atomic_uint_fast32_t g_opt_frag_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
-
-void crypto_option_set_mtu(uint32_t mtu)
-{
-    if (mtu < 512)
-        mtu = 512;
-    if (mtu > CRYPTO_OPT_FRAG_MTU_DEFAULT)
-        mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
-    atomic_store(&g_opt_frag_mtu, mtu);
-}
-
-uint32_t crypto_option_get_mtu(void)
-{
-    uint32_t mtu = (uint32_t)atomic_load(&g_opt_frag_mtu);
-    if (mtu < 512 || mtu > CRYPTO_OPT_FRAG_MTU_DEFAULT)
-        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
-    return mtu;
-}
-
-uint32_t crypto_option_wire_overhead(crypto_option_id id)
-{
-    if (id == CRYPTO_OPT_L2_PQC)
-        /* Reserve the maximum L2 overhead, including the optional TCP
-         * bonding marker and authenticated sequence shim. */
-        return 1u + 1u + PACKET_CRYPTO_NONCE_BYTES + AES_GCM_TAG_SIZE + 13u;
-    return 0u;
-}
 
 #define CALL_OPS(fn, id, proto, ...) do { \
     const struct crypto_option_ops *ops = crypto_option_ops((id), (proto)); \

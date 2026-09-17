@@ -33,6 +33,16 @@ void dp_udp_bond_rx(struct forwarder *fwd, uint32_t epoch, uint32_t seq,
 void dp_udp_bond_runtime_gc(struct forwarder *fwd, int worker_idx);
 void dp_udp_bond_runtime_reset(struct forwarder *fwd, int worker_idx);
 
+/* Reassembly ownership belongs to UDP bonding; crypto only authenticates and
+ * decrypts each wire fragment before passing the plaintext piece here. */
+int dp_udp_fragment_reassemble(int worker_idx, uint8_t wire_policy_id,
+                               const uint8_t *packet, uint32_t packet_len,
+                               uint32_t epoch, uint32_t datagram_id,
+                               uint32_t bond_seq, uint8_t fragment_index,
+                               uint8_t *out, uint32_t *out_len);
+void dp_udp_fragment_gc(int worker_idx, uint64_t now_ns);
+void dp_udp_fragment_reset(int worker_idx);
+
 void dp_udp_reorder_configure_from_env(void);
 void dp_udp_reorder_get_stats(struct dp_udp_reorder_stats *out);
 

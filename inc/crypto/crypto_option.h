@@ -7,9 +7,24 @@
 #include "../core/util/config.h"
 #include "packet_crypto.h"
 
-#define CRYPTO_OPT_FRAG_MTU_DEFAULT  1500u
-#define OPT_FRAG_TABLE_SIZE          4096
-#define OPT_FRAG_TIMEOUT_NS          (200ULL * 1000000ULL)
+/* L2-PQC wire envelope. Protocol-specific TCP/UDP/ARP handling stays in its
+ * owning dataplane module; these APIs only identify the encrypted envelope. */
+#define CRYPTO_L2_PQC_ETHERTYPE      0x104Au
+#define CRYPTO_L2_PQC_UDP_ETHERTYPE  0x104Bu
+#define CRYPTO_L2_PQC_ARP_ETHERTYPE  0x1048u
+/* Existing wire constants used by the XDP loader and profile configuration. */
+#define NE_L2_FAKE_ETHERTYPE      CRYPTO_L2_PQC_ETHERTYPE
+#define NE_L2_FAKE_ETHERTYPE_UDP  CRYPTO_L2_PQC_UDP_ETHERTYPE
+#define NE_L2_FAKE_ETHERTYPE_ARP  CRYPTO_L2_PQC_ARP_ETHERTYPE
+
+int crypto_l2_pqc_is_wire(const uint8_t *packet, size_t packet_len);
+int crypto_l2_pqc_is_arp_wire(const uint8_t *packet, size_t packet_len);
+int crypto_l2_pqc_read_policy_id(const uint8_t *packet, uint32_t packet_len,
+                                 uint8_t *policy_id_out);
+int crypto_l2_pqc_frag_tag_offset(const uint8_t *packet, size_t packet_len,
+                                  int nonce_size);
+int crypto_l2_pqc_read_worker_idx(const uint8_t *packet, uint32_t packet_len,
+                                  uint8_t *worker_idx_out);
 
 /* --- worker bind (forwarder sets once per crypto thread) --- */
 
@@ -23,9 +38,6 @@ int crypto_l2_pqc_reasm_held(void);
 uint64_t crypto_l2_pqc_reasm_out_addr(void);
 
 /* --- option router --- */
-
-void crypto_option_set_mtu(uint32_t mtu);
-uint32_t crypto_option_get_mtu(void);
 
 typedef enum {
     CRYPTO_OPT_L2_PQC = 0,
@@ -59,9 +71,6 @@ struct crypto_option_ops {
 };
 
 const struct crypto_option_ops *crypto_option_ops(crypto_option_id id, crypto_proto_class proto);
-
-uint32_t crypto_option_wire_overhead(crypto_option_id id);
-
 
 int crypto_l2_pqc_encrypt_tcp_l3(struct packet_crypto_ctx *ctx,
                                  uint8_t *pkt, uint32_t *pkt_len,

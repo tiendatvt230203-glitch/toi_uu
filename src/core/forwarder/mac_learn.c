@@ -1,8 +1,9 @@
-#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/forwarder/mac_learn.h"
 #include "../../../inc/core/forwarder/forwarder.h"
 #include "../../../inc/core/util/config.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/dataplane/dataplane_util.h"
+#include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/failover/cfm_diag.h"
 
 #include <stdio.h>
@@ -1174,7 +1175,7 @@ void mac_learn(struct forwarder *fwd, int ingress_idx, const uint8_t *pkt, uint3
         return;
     if (!ne_pair_local_live(&fwd->pair, ingress_idx))
         return;
-    if (src != MAC_LEARN_SRC_ARP || !dp_pkt_is_arp(pkt, len))
+    if (src != MAC_LEARN_SRC_ARP || !arp_bridge_is_packet(pkt, len))
         return;
 
     eth_src = pkt + MAC_LEN;

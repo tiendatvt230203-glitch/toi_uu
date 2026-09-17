@@ -14,6 +14,7 @@ int dp_tcp_bond_tx_prepare(struct forwarder *fwd, int profile_idx, int flow_ok,
                            int feature_allowed);
 int dp_tcp_bond_tx_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet,
                            uint32_t *packet_len, int l3_offset);
+int dp_tcp_bond_clamp_mss(uint8_t *packet, uint32_t packet_len, int l3_offset);
 void dp_tcp_bond_clear_rx_meta(void);
 void dp_tcp_bond_set_rx_meta(uint32_t epoch, uint32_t seq);
 int dp_tcp_bond_take_rx_meta(uint32_t *epoch, uint32_t *seq);

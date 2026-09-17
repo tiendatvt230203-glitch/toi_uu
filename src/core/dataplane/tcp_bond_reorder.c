@@ -228,6 +228,92 @@ int dp_tcp_bond_tx_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet,
                                         g_tx_wire_ordering);
 }
 
+static void tcp_checksum_replace_word(uint8_t *tcp, uint16_t old_word,
+                                      uint16_t new_word)
+{
+    uint32_t sum;
+    uint16_t checksum;
+
+    if (!tcp || old_word == new_word)
+        return;
+    checksum = (uint16_t)(((uint16_t)tcp[16] << 8) | tcp[17]);
+    sum = (uint32_t)(~checksum & 0xffffu) +
+          (uint32_t)(~old_word & 0xffffu) + new_word;
+    while (sum >> 16)
+        sum = (sum & 0xffffu) + (sum >> 16);
+    checksum = (uint16_t)~sum;
+    tcp[16] = (uint8_t)(checksum >> 8);
+    tcp[17] = (uint8_t)checksum;
+}
+
+int dp_tcp_bond_clamp_mss(uint8_t *packet, uint32_t packet_len, int l3_offset)
+{
+    uint32_t path_mtu = 1500u;
+    uint32_t overhead = 1u + 1u + PACKET_CRYPTO_NONCE_BYTES +
+                        AES_GCM_TAG_SIZE + 13u;
+    uint8_t *ip;
+    uint8_t *tcp;
+    uint32_t ihl;
+    uint32_t tcp_len;
+    uint32_t option;
+    uint32_t mss_cap;
+
+    if (!packet || l3_offset < 0 || path_mtu < 576 ||
+        packet_len < (uint32_t)l3_offset + 20u)
+        return -1;
+    ip = packet + l3_offset;
+    if ((ip[0] & 0xf0u) != 0x40u || ip[9] != IPPROTO_TCP)
+        return -1;
+    if ((ip[6] & 0x1fu) || ip[7])
+        return 0;
+
+    ihl = (uint32_t)(ip[0] & 0x0fu) * 4u;
+    if (ihl < 20u || packet_len < (uint32_t)l3_offset + ihl + 20u)
+        return -1;
+    tcp = ip + ihl;
+    if ((tcp[13] & 0x02u) == 0)
+        return 0;
+
+    tcp_len = (uint32_t)(tcp[12] >> 4) * 4u;
+    if (tcp_len < 20u || packet_len < (uint32_t)l3_offset + ihl + tcp_len ||
+        path_mtu <= ihl + 20u + overhead)
+        return -1;
+    mss_cap = path_mtu - ihl - 20u - overhead;
+    if (mss_cap < 536u)
+        mss_cap = 536u;
+
+    for (option = 20u; option + 1u < tcp_len;) {
+        uint8_t kind = tcp[option];
+        uint8_t option_len;
+
+        if (kind == 0)
+            break;
+        if (kind == 1) {
+            option++;
+            continue;
+        }
+        option_len = tcp[option + 1u];
+        if (option_len < 2u || option + option_len > tcp_len)
+            break;
+        if (kind == 2 && option_len == 4u) {
+            uint16_t old_mss = (uint16_t)(((uint16_t)tcp[option + 2u] << 8) |
+                                          tcp[option + 3u]);
+            uint16_t new_mss = old_mss;
+
+            if (old_mss > mss_cap)
+                new_mss = (uint16_t)mss_cap;
+            if (new_mss == old_mss)
+                return 0;
+            tcp[option + 2u] = (uint8_t)(new_mss >> 8);
+            tcp[option + 3u] = (uint8_t)new_mss;
+            tcp_checksum_replace_word(tcp, old_mss, new_mss);
+            return 1;
+        }
+        option += option_len;
+    }
+    return 0;
+}
+
 static int tcp_bond_emit(void *ctx, struct dp_tcp_bond_item *item)
 {
     struct forwarder *fwd = ctx;

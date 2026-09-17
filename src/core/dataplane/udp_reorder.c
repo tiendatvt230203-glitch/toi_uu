@@ -18,6 +18,30 @@
 
 /* Change this one line to 1 to test UDP per-packet bonding. Default: per-flow. */
 #define UDP_BOND_PER_PACKET 0
+#define UDP_ETH_L2_MAX      18u
+
+static int udp_eth_header_len(const uint8_t *packet, uint32_t packet_len)
+{
+    uint16_t ethertype;
+
+    if (!packet || packet_len < 14u)
+        return -1;
+    ethertype = ((uint16_t)packet[12] << 8) | packet[13];
+    if (ethertype == 0x8100u) {
+        if (packet_len < UDP_ETH_L2_MAX)
+            return -1;
+        return 18;
+    }
+    return 14;
+}
+
+static void udp_restore_ipv4_ethertype(uint8_t *packet, uint32_t eth_len)
+{
+    if (!packet || eth_len < 2u)
+        return;
+    packet[eth_len - 2u] = 0x08;
+    packet[eth_len - 1u] = 0x00;
+}
 
 struct dp_udp_reorder_key {
     uint32_t src_ip;
@@ -414,13 +438,224 @@ void dp_udp_bond_rx(struct forwarder *fwd, uint32_t epoch, uint32_t seq,
 void dp_udp_bond_runtime_gc(struct forwarder *fwd, int worker_idx)
 {
     struct dp_udp_reorder_ops ops = udp_bond_ops(fwd);
-    dp_udp_reorder_gc(worker_idx, dp_udp_reorder_now_ns(), &ops);
+    uint64_t now_ns = dp_udp_reorder_now_ns();
+
+    dp_udp_reorder_gc(worker_idx, now_ns, &ops);
+    dp_udp_fragment_gc(worker_idx, now_ns);
 }
 
 void dp_udp_bond_runtime_reset(struct forwarder *fwd, int worker_idx)
 {
     struct dp_udp_reorder_ops ops = udp_bond_ops(fwd);
     dp_udp_reorder_reset_worker(worker_idx, &ops);
+    dp_udp_fragment_reset(worker_idx);
+}
+
+#define UDP_FRAGMENT_TABLE_SIZE 4096u
+#define UDP_FRAGMENT_TIMEOUT_NS (200ULL * 1000000ULL)
+#define UDP_FRAGMENT_PROBE      8u
+
+struct udp_fragment_entry {
+    uint32_t epoch;
+    uint32_t datagram_id;
+    uint32_t bond_seq;
+    uint32_t first_len;
+    uint32_t second_len;
+    uint64_t timestamp_ns;
+    uint8_t eth_hdr[UDP_ETH_L2_MAX];
+    uint8_t eth_len;
+    uint8_t got_first;
+    uint8_t got_second;
+    uint8_t wire_policy_id;
+    uint8_t first[1600];
+    uint8_t second[1600];
+};
+
+struct udp_fragment_table {
+    uint32_t gc_cursor;
+    struct udp_fragment_entry entries[UDP_FRAGMENT_TABLE_SIZE];
+};
+
+static struct udp_fragment_table *g_fragment_tables[NE_CRYPTO_WORKERS];
+
+static void udp_fragment_clear(struct udp_fragment_entry *entry)
+{
+    entry->epoch = 0;
+    entry->datagram_id = 0;
+    entry->bond_seq = 0;
+    entry->first_len = 0;
+    entry->second_len = 0;
+    entry->timestamp_ns = 0;
+    entry->eth_len = 0;
+    entry->got_first = 0;
+    entry->got_second = 0;
+    entry->wire_policy_id = 0;
+}
+
+static struct udp_fragment_table *udp_fragment_table(int worker_idx, int create)
+{
+    struct udp_fragment_table *table;
+
+    if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
+        worker_idx = 0;
+    table = g_fragment_tables[worker_idx];
+    if (!table && create) {
+        table = calloc(1, sizeof(*table));
+        if (table)
+            g_fragment_tables[worker_idx] = table;
+    }
+    return table;
+}
+
+static void udp_fragment_prepare(struct udp_fragment_entry *entry,
+                                 uint8_t policy, uint32_t epoch,
+                                 uint32_t datagram_id, uint32_t bond_seq,
+                                 uint64_t now_ns)
+{
+    if (entry->wire_policy_id != policy || entry->epoch != epoch ||
+        entry->datagram_id != datagram_id || entry->bond_seq != bond_seq ||
+        ((entry->got_first || entry->got_second) &&
+         now_ns - entry->timestamp_ns > UDP_FRAGMENT_TIMEOUT_NS))
+        udp_fragment_clear(entry);
+    entry->wire_policy_id = policy;
+    entry->epoch = epoch;
+    entry->datagram_id = datagram_id;
+    entry->bond_seq = bond_seq;
+    entry->timestamp_ns = now_ns;
+}
+
+static uint32_t udp_fragment_slot(struct udp_fragment_table *table,
+                                  uint8_t policy, uint32_t epoch,
+                                  uint32_t datagram_id, uint64_t now_ns)
+{
+    uint32_t base = (datagram_id ^ epoch * 0x9e3779b9u ^
+                     (uint32_t)policy * 0x85ebca6bu) %
+                    UDP_FRAGMENT_TABLE_SIZE;
+    uint32_t empty = UINT32_MAX;
+    uint32_t oldest = base;
+    uint64_t oldest_age = 0;
+
+    for (uint32_t n = 0; n < UDP_FRAGMENT_PROBE; n++) {
+        uint32_t index = (base + n) % UDP_FRAGMENT_TABLE_SIZE;
+        struct udp_fragment_entry *entry = &table->entries[index];
+        int occupied = entry->got_first || entry->got_second;
+
+        if (occupied && now_ns - entry->timestamp_ns > UDP_FRAGMENT_TIMEOUT_NS) {
+            udp_fragment_clear(entry);
+            occupied = 0;
+        }
+        if (!occupied) {
+            if (empty == UINT32_MAX)
+                empty = index;
+        } else if (entry->wire_policy_id == policy && entry->epoch == epoch &&
+                   entry->datagram_id == datagram_id) {
+            return index;
+        } else if (now_ns - entry->timestamp_ns > oldest_age) {
+            oldest = index;
+            oldest_age = now_ns - entry->timestamp_ns;
+        }
+    }
+    return empty != UINT32_MAX ? empty : oldest;
+}
+
+int dp_udp_fragment_reassemble(int worker_idx, uint8_t policy,
+                               const uint8_t *packet, uint32_t packet_len,
+                               uint32_t epoch, uint32_t datagram_id,
+                               uint32_t bond_seq, uint8_t fragment_index,
+                               uint8_t *out, uint32_t *out_len)
+{
+    struct udp_fragment_table *table;
+    struct udp_fragment_entry *entry;
+    const uint8_t *inner;
+    uint32_t inner_len;
+    uint32_t eth_len;
+    uint32_t index;
+    uint64_t now_ns = dp_udp_reorder_now_ns();
+
+    if (!packet || !out || !out_len || fragment_index > 1u)
+        return -1;
+    {
+        int header_len = udp_eth_header_len(packet, packet_len);
+        if (header_len < 0)
+            return -1;
+        eth_len = (uint32_t)header_len;
+    }
+    if (eth_len > UDP_ETH_L2_MAX || packet_len < eth_len)
+        return -1;
+    inner = packet + eth_len;
+    inner_len = packet_len - eth_len;
+    if (inner_len > 1600u ||
+        (fragment_index == 0u &&
+         (inner_len < 20u || (inner[0] >> 4) != 4u)))
+        return -1;
+
+    table = udp_fragment_table(worker_idx, 1);
+    if (!table)
+        return -1;
+    index = udp_fragment_slot(table, policy, epoch, datagram_id, now_ns);
+    entry = &table->entries[index];
+    udp_fragment_prepare(entry, policy, epoch, datagram_id, bond_seq, now_ns);
+
+    if (fragment_index == 0u) {
+        if (entry->got_second) {
+            if (eth_len + inner_len + entry->second_len > NE_FRAME)
+                return -1;
+            memcpy(out, packet, eth_len);
+            memmove(out + eth_len, inner, inner_len);
+            memcpy(out + eth_len + inner_len, entry->second,
+                   entry->second_len);
+            *out_len = eth_len + inner_len + entry->second_len;
+            udp_restore_ipv4_ethertype(out, eth_len);
+            udp_fragment_clear(entry);
+            return 1;
+        }
+        memcpy(entry->eth_hdr, packet, eth_len);
+        memcpy(entry->first, inner, inner_len);
+        entry->eth_len = (uint8_t)eth_len;
+        entry->first_len = inner_len;
+        entry->got_first = 1;
+        return 0;
+    }
+
+    if (entry->got_first) {
+        if ((uint32_t)entry->eth_len + entry->first_len + inner_len > NE_FRAME)
+            return -1;
+        memcpy(out, entry->eth_hdr, entry->eth_len);
+        memcpy(out + entry->eth_len, entry->first, entry->first_len);
+        memmove(out + entry->eth_len + entry->first_len, inner, inner_len);
+        *out_len = (uint32_t)entry->eth_len + entry->first_len + inner_len;
+        udp_restore_ipv4_ethertype(out, entry->eth_len);
+        udp_fragment_clear(entry);
+        return 1;
+    }
+    memcpy(entry->second, inner, inner_len);
+    entry->second_len = inner_len;
+    entry->got_second = 1;
+    return 0;
+}
+
+void dp_udp_fragment_gc(int worker_idx, uint64_t now_ns)
+{
+    struct udp_fragment_table *table = udp_fragment_table(worker_idx, 0);
+
+    if (!table)
+        return;
+    for (uint32_t n = 0; n < 256u; n++) {
+        uint32_t index = (table->gc_cursor + n) % UDP_FRAGMENT_TABLE_SIZE;
+        struct udp_fragment_entry *entry = &table->entries[index];
+        if ((entry->got_first || entry->got_second) &&
+            now_ns - entry->timestamp_ns > UDP_FRAGMENT_TIMEOUT_NS)
+            udp_fragment_clear(entry);
+    }
+    table->gc_cursor = (table->gc_cursor + 256u) % UDP_FRAGMENT_TABLE_SIZE;
+}
+
+void dp_udp_fragment_reset(int worker_idx)
+{
+    if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
+        return;
+    free(g_fragment_tables[worker_idx]);
+    g_fragment_tables[worker_idx] = NULL;
 }
 
 #define UDP_REORDER_SETS              2048u

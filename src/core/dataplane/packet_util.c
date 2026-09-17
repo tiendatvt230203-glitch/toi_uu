@@ -3,11 +3,29 @@
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
-#include "../../../inc/crypto/eth_parse.h"
 
 #include <arpa/inet.h>
 #include <netinet/ip.h>
 #include <string.h>
+
+static int packet_ipv4_offset(const uint8_t *packet, uint32_t packet_len)
+{
+    uint16_t ethertype;
+    int offset = 14;
+
+    if (!packet || packet_len < 14u)
+        return -1;
+    ethertype = ((uint16_t)packet[12] << 8) | packet[13];
+    if (ethertype == 0x8100u) {
+        if (packet_len < 18u)
+            return -1;
+        ethertype = ((uint16_t)packet[16] << 8) | packet[17];
+        offset = 18;
+    }
+    if (ethertype != 0x0800u || packet_len < (uint32_t)(offset + 20))
+        return -1;
+    return offset;
+}
 
 int dp_parse_flow_tcp_meta(void *pkt_data, uint32_t pkt_len,
                            uint32_t *src_ip, uint32_t *dst_ip,
@@ -22,7 +40,7 @@ int dp_parse_flow_tcp_meta(void *pkt_data, uint32_t pkt_len,
     if (!pkt_data || !src_ip || !dst_ip || !src_port || !dst_port || !proto)
         return -1;
 
-    l3_off = crypto_eth_ipv4_offset(pkt_data, pkt_len);
+    l3_off = packet_ipv4_offset(pkt_data, pkt_len);
     if (l3_off < 0)
         return -1;
 
@@ -61,22 +79,6 @@ int dp_parse_flow(void *pkt_data, uint32_t pkt_len,
 {
     return dp_parse_flow_tcp_meta(pkt_data, pkt_len, src_ip, dst_ip,
                                   src_port, dst_port, proto, NULL, NULL);
-}
-
-int dp_pkt_is_arp(const uint8_t *pkt, uint32_t len)
-{
-    uint16_t et;
-
-    if (!pkt || len < ETH_HEADER_SIZE)
-        return 0;
-
-    et = ((uint16_t)pkt[12] << 8) | pkt[13];
-    if (et == 0x8100u) {
-        if (len < 18u)
-            return 0;
-        et = ((uint16_t)pkt[16] << 8) | pkt[17];
-    }
-    return et == 0x0806u;
 }
 
 static int arp_payload_offset(const uint8_t *pkt, uint32_t len, uint32_t *off_out)

@@ -1,6 +1,18 @@
 #include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/core/failover/cfm_diag.h"
 #include "../../../inc/core/forwarder/forwarder.h"
+#include "../../../inc/core/dataplane/arp_bridge.h"
+
+static void wan_failover_state_changed(int wan_dp, const char *ifname,
+                                       int old_state, int new_state,
+                                       void *user)
+{
+    (void)ifname;
+    (void)old_state;
+    (void)user;
+    arp_bridge_link_state_changed(wan_dp,
+                                  new_state == CFM_LINK_STATE_UP);
+}
 
 int wan_failover_enabled(void)
 {
@@ -15,8 +27,8 @@ int wan_failover_start(struct forwarder *fwd)
     if (!wan_failover_enabled())
         return 0;
 
-    /* user=fwd: MAC table dump in cfm notify_is_up reads g_state_cb_user. */
-    cfm_set_state_callback(NULL, fwd);
+    arp_bridge_failover_reset();
+    cfm_set_state_callback(wan_failover_state_changed, fwd);
 
     if (cfm_init(fwd->cfg) != 0)
         return -1;
@@ -30,7 +42,8 @@ void wan_failover_on_cfg(struct forwarder *fwd)
     if (!wan_failover_enabled())
         return;
 
-    cfm_set_state_callback(NULL, fwd);
+    arp_bridge_failover_reset();
+    cfm_set_state_callback(wan_failover_state_changed, fwd);
     (void)cfm_init(fwd->cfg);
 }
 
@@ -40,6 +53,7 @@ void wan_failover_stop(void)
         return;
     cfm_set_state_callback(NULL, NULL);
     cfm_cleanup();
+    arp_bridge_failover_reset();
 }
 
 int wan_failover_dp_excluded(int wan_dp)

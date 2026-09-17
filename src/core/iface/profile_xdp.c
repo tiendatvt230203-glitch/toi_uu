@@ -2,7 +2,7 @@
 #include "../../../inc/core/iface/profile_iface_lifecycle.h"
 
 #include "../../../inc/core/iface/interface.h"
-#include "../../../inc/crypto/eth_parse.h"
+#include "../../../inc/crypto/crypto_option.h"
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
