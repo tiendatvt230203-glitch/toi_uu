@@ -285,11 +285,6 @@ static void *forwarder_thread_main(void *arg) {
         rt->running = 0;
         return NULL;
     }
-    if (forwarder_should_stop()) {
-        forwarder_cleanup(&rt->fwd);
-        rt->running = 0;
-        return NULL;
-    }
     rt->running = 1;
     forwarder_run(&rt->fwd);
     rt->running = 0;
@@ -334,89 +329,20 @@ static int policy_fields_equal(const struct crypto_policy *a,
            a->dst_mask == b->dst_mask;
 }
 
-static const struct crypto_policy *policy_by_db_id(const struct app_config *cfg,
-                                                   int db_id)
-{
-    for (int i = 0; i < cfg->policy_count; i++) {
-        if (cfg->policies[i].db_id == db_id)
-            return &cfg->policies[i];
-    }
-    return NULL;
-}
-
-static void log_policy_db_ids(const char *tag, const struct app_config *cfg)
-{
-    if (!cfg)
-        return;
-    fprintf(stderr, "%s policy db_ids(%d):", tag, cfg->policy_count);
-    for (int i = 0; i < cfg->policy_count; i++)
-        fprintf(stderr, " %d", cfg->policies[i].db_id);
-    fprintf(stderr, "\n");
-}
-
-static int policies_db_unchanged(const struct app_config *old,
-                                 const struct app_config *new)
-{
-    if (old->policy_count != new->policy_count)
-        return 0;
-    for (int i = 0; i < old->policy_count; i++) {
-        int db_id = old->policies[i].db_id;
-        const struct crypto_policy *np = policy_by_db_id(new, db_id);
-        if (!np || !policy_fields_equal(&old->policies[i], np))
-            return 0;
-    }
-    for (int i = 0; i < new->policy_count; i++) {
-        int db_id = new->policies[i].db_id;
-        const struct crypto_policy *op = policy_by_db_id(old, db_id);
-        if (!op || !policy_fields_equal(op, &new->policies[i]))
-            return 0;
-    }
-    return 1;
-}
-
-static const struct local_config *local_by_ifname(const struct app_config *cfg,
-                                                  const char *ifname)
-{
-    for (int i = 0; i < cfg->local_count; i++) {
-        if (strcmp(cfg->locals[i].ifname, ifname) == 0)
-            return &cfg->locals[i];
-    }
-    return NULL;
-}
-
-static int local_db_equal(const struct local_config *a, const struct local_config *b)
-{
-    return strcmp(a->ifname, b->ifname) == 0;
-}
-
-static const struct wan_config *wan_by_ifname(const struct app_config *cfg,
-                                              const char *ifname)
-{
-    for (int i = 0; i < cfg->wan_count; i++) {
-        if (strcmp(cfg->wans[i].ifname, ifname) == 0)
-            return &cfg->wans[i];
-    }
-    return NULL;
-}
-
-static int wan_db_equal(const struct wan_config *a, const struct wan_config *b)
-{
-    return strcmp(a->ifname, b->ifname) == 0 &&
-           a->dst_ip == b->dst_ip &&
-           a->dataplane == b->dataplane;
-}
-
-static int profile_db_unchanged(const struct app_config *old,
+/* Compare the editable DB content of two revisions of the same profile.
+ * Derived values and fixed BPF paths are intentionally not compared. */
+static int profile_config_equal(const struct app_config *old,
                                 const struct app_config *new)
 {
-    if (old->profile_id != new->profile_id ||
-        old->enabled != new->enabled ||
-        old->bridge_count != new->bridge_count ||
-        old->policy_count != new->policy_count ||
+    if (!old || !new || old->enabled != new->enabled ||
+        strcmp(old->profile_name, new->profile_name) != 0 ||
         old->local_count != new->local_count ||
         old->wan_count != new->wan_count ||
-        strcmp(old->profile_name, new->profile_name) != 0 ||
-        strcmp(old->pqc.local_identity_fingerprint,
+        old->bridge_count != new->bridge_count ||
+        old->policy_count != new->policy_count)
+        return 0;
+
+    if (strcmp(old->pqc.local_identity_fingerprint,
                new->pqc.local_identity_fingerprint) != 0 ||
         strcmp(old->pqc.peer_fingerprint, new->pqc.peer_fingerprint) != 0 ||
         old->pqc.is_initiator != new->pqc.is_initiator ||
@@ -424,12 +350,10 @@ static int profile_db_unchanged(const struct app_config *old,
         strcmp(old->pqc.peer_public_key, new->pqc.peer_public_key) != 0)
         return 0;
 
-    for (int i = 0; i < old->policy_count; i++) {
-        int odb = old->policies[i].db_id;
+    for (int i = 0; i < old->local_count; i++) {
         int found = 0;
-        for (int j = 0; j < new->policy_count; j++) {
-            int ndb = new->policies[j].db_id;
-            if (odb == ndb) {
+        for (int j = 0; j < new->local_count; j++) {
+            if (strcmp(old->locals[i].ifname, new->locals[j].ifname) == 0) {
                 found = 1;
                 break;
             }
@@ -437,234 +361,48 @@ static int profile_db_unchanged(const struct app_config *old,
         if (!found)
             return 0;
     }
-    for (int j = 0; j < new->policy_count; j++) {
-        int ndb = new->policies[j].db_id;
-        int found = 0;
-        for (int i = 0; i < old->policy_count; i++) {
-            int odb = old->policies[i].db_id;
-            if (odb == ndb) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found)
-            return 0;
-    }
-
     for (int i = 0; i < old->wan_count; i++) {
-        if (old->wans[i].bandwidth_weight != new->wans[i].bandwidth_weight)
+        int found = 0;
+        for (int j = 0; j < new->wan_count; j++) {
+            const struct wan_config *a = &old->wans[i];
+            const struct wan_config *b = &new->wans[j];
+            if (strcmp(a->ifname, b->ifname) == 0 &&
+                a->dst_ip == b->dst_ip && a->dataplane == b->dataplane &&
+                a->bandwidth_weight == b->bandwidth_weight) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
             return 0;
     }
     for (int i = 0; i < old->bridge_count; i++) {
-        if (old->bridges[i].local_slot != new->bridges[i].local_slot ||
-            old->bridges[i].wan_slot != new->bridges[i].wan_slot ||
-            strcmp(old->bridges[i].ifname, new->bridges[i].ifname) != 0)
+        int found = 0;
+        for (int j = 0; j < new->bridge_count; j++) {
+            const struct bridge_config *a = &old->bridges[i];
+            const struct bridge_config *b = &new->bridges[j];
+            if (a->local_slot == b->local_slot && a->wan_slot == b->wan_slot &&
+                strcmp(a->ifname, b->ifname) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+            return 0;
+    }
+    for (int i = 0; i < old->policy_count; i++) {
+        int found = 0;
+        for (int j = 0; j < new->policy_count; j++) {
+            if (old->policies[i].db_id == new->policies[j].db_id &&
+                policy_fields_equal(&old->policies[i], &new->policies[j])) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
             return 0;
     }
     return 1;
-}
-
-static int config_db_unchanged(const struct app_config *old,
-                               const struct app_config *new)
-{
-    if (!old || !new)
-        return 0;
-
-    if (old->local_count != new->local_count ||
-        old->wan_count != new->wan_count ||
-        old->policy_count != new->policy_count ||
-        old->crypto_enabled != new->crypto_enabled ||
-        old->fake_ethertype_ipv4 != new->fake_ethertype_ipv4 ||
-        strcmp(old->bpf_lan_file, new->bpf_lan_file) != 0 ||
-        strcmp(old->bpf_wan_file, new->bpf_wan_file) != 0)
-        return 0;
-
-    for (int i = 0; i < old->local_count; i++) {
-        const struct local_config *nl =
-            local_by_ifname(new, old->locals[i].ifname);
-        if (!nl || !local_db_equal(&old->locals[i], nl))
-            return 0;
-    }
-
-    for (int i = 0; i < old->wan_count; i++) {
-        const struct wan_config *nw = wan_by_ifname(new, old->wans[i].ifname);
-        if (!nw || !wan_db_equal(&old->wans[i], nw))
-            return 0;
-    }
-
-    if (!policies_db_unchanged(old, new))
-        return 0;
-
-    return profile_db_unchanged(old, new);
-}
-
-static int active_profile_unchanged(const struct app_config *old,
-                                    const struct app_config *new)
-{
-    if (!old || !new)
-        return 0;
-    return profile_db_unchanged(old, new);
-}
-
-
-static int lan_wan_db_unchanged(const struct app_config *old,
-                                const struct app_config *new)
-{
-    if (!old || !new)
-        return 0;
-    if (old->local_count != new->local_count ||
-        old->wan_count != new->wan_count)
-        return 0;
-
-    for (int i = 0; i < old->local_count; i++) {
-        const struct local_config *nl =
-            local_by_ifname(new, old->locals[i].ifname);
-        if (!nl || !local_db_equal(&old->locals[i], nl))
-            return 0;
-    }
-    for (int i = 0; i < old->wan_count; i++) {
-        const struct wan_config *nw = wan_by_ifname(new, old->wans[i].ifname);
-        if (!nw || !wan_db_equal(&old->wans[i], nw))
-            return 0;
-    }
-    return 1;
-}
-
-
-static int runtime_tuning_only_change(const struct app_config *old,
-                                      const struct app_config *new)
-{
-    if (!old || !new || lan_wan_db_unchanged(old, new))
-        return 0;
-    if (!forwarder_same_topology(old, new))
-        return 0;
-    if (!policies_db_unchanged(old, new))
-        return 0;
-    return active_profile_unchanged(old, new);
-}
-
-static int apply_active_configs(struct runtime_state *rt, int profile_id) {
-    struct app_config *new_cfg = calloc(1, sizeof(*new_cfg));
-    if (!new_cfg) {
-        fprintf(stderr, "[FATAL] out of memory building config\n");
-        return -1;
-    }
-    if (load_active_profile_config(new_cfg, profile_id) != 0) {
-        fprintf(stderr,
-                "[ERR] profile %d: failed to load config from Postgres (see [DB] lines above)\n",
-                profile_id);
-        free(new_cfg);
-        return -1;
-    }
-
-    if (!rt->has_thread) {
-        fprintf(stderr, "[LOAD] active: %d\n", profile_id);
-        main_diag_log_db_apply(new_cfg, profile_id, NULL);
-        int rc = runtime_start(rt, new_cfg);
-        free(new_cfg);
-        return rc != 0 ? -1 : 0;
-    }
-
-    int next_slot = 1 - rt->active_slot;
-    const struct app_config *prev_cfg = &rt->cfg_slots[rt->active_slot];
-
-    rt->cfg_slots[next_slot] = *new_cfg;
-    free(new_cfg);
-
-    if (config_db_unchanged(prev_cfg, &rt->cfg_slots[next_slot])) {
-        fprintf(stderr,
-                "[DB] profile %d — no change on first read (Postgres may not have committed yet), retry...\n",
-                profile_id);
-        fflush(stderr);
-        usleep(500000);
-        if (load_active_profile_config(&rt->cfg_slots[next_slot], profile_id) != 0) {
-            fprintf(stderr,
-                    "[ERR] profile %d: DB reload retry failed (see [DB] lines above)\n",
-                    profile_id);
-            return -1;
-        }
-    }
-
-    if (config_db_unchanged(prev_cfg, &rt->cfg_slots[next_slot])) {
-        log_policy_db_ids("[DB] Postgres", &rt->cfg_slots[next_slot]);
-        log_policy_db_ids("[DB] running", prev_cfg);
-        main_diag_log_no_update(profile_id, prev_cfg);
-        return 0;
-    }
-
-    int policy_only = lan_wan_db_unchanged(prev_cfg, &rt->cfg_slots[next_slot]);
-    int topo_ok = forwarder_same_topology(prev_cfg, &rt->cfg_slots[next_slot]);
-
-    if (policy_only)
-        main_diag_log_db_policy_apply(&rt->cfg_slots[next_slot], profile_id, prev_cfg);
-    else
-        main_diag_log_db_apply(&rt->cfg_slots[next_slot], profile_id, prev_cfg);
-
-    if (!topo_ok) {
-        fprintf(stderr,
-                "[RELOAD] profile %d — LAN/WAN change — full dataplane restart "
-                "(clean UMEM; service stays up)\n",
-                profile_id);
-        fflush(stderr);
-        if (runtime_stop_forwarder(rt) != 0)
-            return -1;
-        if (g_stop_requested)
-            return -1;
-        rt->active_slot = next_slot;
-        if (runtime_start(rt, &rt->cfg_slots[rt->active_slot]) != 0)
-            return -1;
-        fprintf(stderr,
-                "[RELOAD] OK profile %d — applied (full dataplane restart)\n",
-                profile_id);
-        main_diag_log_config_summary(&rt->cfg_slots[rt->active_slot], profile_id, 1, 0);
-        fflush(stderr);
-        return 0;
-    }
-
-    if (!policy_only) {
-
-        int tuning = runtime_tuning_only_change(prev_cfg, &rt->cfg_slots[next_slot]);
-        fprintf(stderr,
-                "[RELOAD] profile %d — same LAN/WAN ifnames (%s, hot reload)\n",
-                profile_id, tuning ? "tuning" : "settings/profile fields");
-        fflush(stderr);
-        if (forwarder_reload_config(&rt->fwd, &rt->cfg_slots[next_slot]) == 0) {
-            rt->active_slot = next_slot;
-            fprintf(stderr,
-                    "[RELOAD] OK profile %d — applied (same-topology hot reload)\n",
-                    profile_id);
-            main_diag_log_config_summary(&rt->cfg_slots[rt->active_slot],
-                                         profile_id, 1, 0);
-            fflush(stderr);
-            return 0;
-        }
-        fprintf(stderr,
-                "[ERR] profile %d: same-topology hot reload failed — "
-                "running dataplane unchanged (no full restart)\n",
-                profile_id);
-        fflush(stderr);
-        return -1;
-    }
-
-    fprintf(stderr,
-            "[RELOAD] profile %d — policies/crypto only (LAN/WAN ifaces unchanged)\n",
-            profile_id);
-    fflush(stderr);
-
-    if (forwarder_reload_config(&rt->fwd, &rt->cfg_slots[next_slot]) == 0) {
-        rt->active_slot = next_slot;
-        fprintf(stderr, "[RELOAD] OK profile %d — applied (hot reload)\n", profile_id);
-        fprintf(stderr, "[RELOAD] active: %d\n", profile_id);
-        main_diag_log_config_summary(&rt->cfg_slots[rt->active_slot], profile_id, 1, 1);
-        fflush(stderr);
-        return 0;
-    }
-    fprintf(stderr,
-            "[ERR] profile %d: policy hot reload failed — "
-            "running dataplane unchanged (no full restart)\n",
-            profile_id);
-    fflush(stderr);
-    return -1;
 }
 
 static void stop_log_step(const char *step)
@@ -706,16 +444,6 @@ static int runtime_stop_forwarder(struct runtime_state *rt) {
 }
 
 
-static int load_profile_and_run(struct runtime_state *rt,
-                                int *active_profile_id,
-                                int profile_id) {
-    if (apply_active_configs(rt, profile_id) != 0)
-        return -1;
-
-    *active_profile_id = profile_id;
-    return 0;
-}
-
 static const char *g_prog_name = "network-encryptor";
 
 static void daemon_idle_log(void)
@@ -749,46 +477,79 @@ static void return_to_blank_daemon(struct runtime_state *rt,
 
 static int handle_profile_notify(struct runtime_state *rt,
                                  int *active_profile_id,
-                                 int profile_id) {
+                                 int profile_id)
+{
+    struct app_config *new_cfg;
+    const struct app_config *old_cfg;
+    int next_slot;
+    int rc;
+
     if (g_stop_requested)
         return 0;
 
-    if (ne_profile_id_exists(profile_id) != 0) {
-        fprintf(stderr,
-                "[FAIL] profile id=%d not found in DB — load aborted\n",
-                profile_id);
-        fflush(stderr);
-        return_to_blank_daemon(rt, active_profile_id);
-        return 0;
-    }
-
-    if (rt->has_thread && *active_profile_id <= 0) {
-        fprintf(stderr,
-                "[LOAD] stale dataplane (thread without active profile) — reset to idle\n");
-        fflush(stderr);
-        return_to_blank_daemon(rt, active_profile_id);
-    } else if (rt->has_thread && !rt->running) {
-        fprintf(stderr,
-                "[LOAD] dataplane thread not running — reset to idle before load\n");
-        fflush(stderr);
-        return_to_blank_daemon(rt, active_profile_id);
-    } else if (*active_profile_id > 0 && *active_profile_id != profile_id) {
-        fprintf(stderr,
-                "[LOAD] replace profile %d → %d (clear old, then load)\n",
-                *active_profile_id, profile_id);
-        fflush(stderr);
-        return_to_blank_daemon(rt, active_profile_id);
-    }
-
-    if (load_profile_and_run(rt, active_profile_id, profile_id) != 0) {
-        fprintf(stderr,
-                "[FAIL] load profile id=%d failed — load aborted\n",
-                profile_id);
-        fflush(stderr);
-        return_to_blank_daemon(rt, active_profile_id);
+    new_cfg = calloc(1, sizeof(*new_cfg));
+    if (!new_cfg)
+        return -1;
+    if (load_active_profile_config(new_cfg, profile_id) != 0) {
+        fprintf(stderr, "[FAIL] cannot load profile id=%d from DB\n", profile_id);
+        free(new_cfg);
         return -1;
     }
-    return 0;
+
+    /* Dataplane belongs to core: create it only when it does not exist. */
+    if (!rt->has_thread) {
+        main_diag_log_db_apply(new_cfg, profile_id, NULL);
+        rc = runtime_start(rt, new_cfg);
+        if (rc == 0) {
+            *active_profile_id = profile_id;
+            fprintf(stderr, "[LOAD] active: %d\n", profile_id);
+        }
+        free(new_cfg);
+        return rc;
+    }
+
+    old_cfg = &rt->cfg_slots[rt->active_slot];
+
+    /* BE case 1: same ID and same editable content — nothing to do. */
+    if (*active_profile_id == profile_id &&
+        profile_config_equal(old_cfg, new_cfg)) {
+        main_diag_log_no_update(profile_id, old_cfg);
+        free(new_cfg);
+        return 0;
+
+    /* BE case 2: same ID with changed policy/profile fields — core applies it. */
+    } else if (*active_profile_id == profile_id) {
+        next_slot = 1 - rt->active_slot;
+        rt->cfg_slots[next_slot] = *new_cfg;
+        free(new_cfg);
+        main_diag_log_db_apply(&rt->cfg_slots[next_slot], profile_id, old_cfg);
+        rc = forwarder_reload_config(&rt->fwd, &rt->cfg_slots[next_slot]);
+        if (rc == 0) {
+            rt->active_slot = next_slot;
+            main_diag_log_config_summary(&rt->cfg_slots[rt->active_slot],
+                                         profile_id, 1, 1);
+            fprintf(stderr, "[EDIT] profile %d applied by dataplane core\n",
+                    profile_id);
+        } else {
+            fprintf(stderr,
+                    "[EDIT] profile %d rejected by dataplane core; core stays up\n",
+                    profile_id);
+        }
+        return rc;
+
+    /* BE case 3: different ID — return to blank daemon, then load as new. */
+    } else {
+        int old_id = *active_profile_id;
+
+        fprintf(stderr, "[LOAD] replace profile %d → %d\n", old_id, profile_id);
+        return_to_blank_daemon(rt, active_profile_id);
+        main_diag_log_db_apply(new_cfg, profile_id, NULL);
+        rc = runtime_start(rt, new_cfg);
+        if (rc == 0)
+            *active_profile_id = profile_id;
+        free(new_cfg);
+        return rc;
+    }
 }
 
 int main(int argc, char **argv) {
