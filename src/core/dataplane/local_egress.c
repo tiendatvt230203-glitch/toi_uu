@@ -11,8 +11,9 @@
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/dataplane/tcp_bond_reorder.h"
+#include "../../../inc/core/dataplane/udp_reorder.h"
 #include "../../../inc/core/failover/wan_failover.h"
-#include "../../../inc/core/flow/flow_table.h"
 #include "../../../inc/core/flow/mac_learn.h"
 
 #include <netinet/in.h>
@@ -22,17 +23,6 @@
 
 #define SPLIT_TAIL_REFILL_BATCH 32u
 
-static int tcp_bond_active(struct forwarder *fwd, int profile_idx)
-{
-    int allowed[MAX_INTERFACES];
-    int weights[MAX_INTERFACES];
-
-    if (!fwd || !fwd->cfg || profile_idx != 0 || !fwd->cfg->enabled)
-        return 0;
-    return fwd_wan_build_profile_pool(fwd, fwd->cfg,
-                                      allowed, weights, MAX_INTERFACES) > 1;
-}
-
 static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
 {
     int ri = dp_out_ring_idx();
@@ -40,13 +30,6 @@ static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
     job->dir = NE_DIR_WAN;
     job->wan_idx = (uint8_t)wan_dp;
     return dp_ring_push(fwd, &fwd->mid_to_wan[wan_dp][ri], job);
-}
-
-static void complete_udp_window_after_enqueue(uint8_t proto, int enqueue_ok)
-{
-    /* TCP advances when its WAN is selected. UDP waits for TX enqueue. */
-    if (proto == IPPROTO_UDP)
-        flow_table_udp_packet_complete(enqueue_ok);
 }
 
 static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
@@ -110,16 +93,9 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
     uint32_t len = job->len;
     uint32_t l1 = 0, l2 = 0;
     crypto_option_id opt_id = CRYPTO_OPT_L2_PQC;
-    uint32_t udp_seq;
 
     (void)flow_ok;
     (void)cp;
-
-    if (pclass == CRYPTO_PROTO_UDP) {
-        if (!flow_ok || dp_udp_next_tx_seq(pkt, len, &udp_seq) != 0)
-            return -1;
-        crypto_option_udp_set_tx_seq(udp_seq);
-    }
 
     if (crypto_option_need_split(opt_id, pclass, len)) {
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
@@ -224,7 +200,9 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (pick_profile_policy(fwd, li, flow_ok, src_ip, dst_ip, src_port, dst_port, proto,
                             &profile_idx, &cp) != 0)
         goto drop;
-    if (proto == IPPROTO_ICMP) {
+    if (proto != IPPROTO_TCP && proto != IPPROTO_UDP) {
+        /* Control/other traffic follows the configured bridge topology.
+         * It is never distributed by the TCP/UDP bonding modules. */
         wan_dp = -1;
         for (int dp = 0; dp < fwd->wan_count; dp++) {
             if (mac_fwd_local_for_wan_dp(fwd, profile_idx, dp) == li &&
@@ -234,19 +212,21 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
                 break;
             }
         }
-    } else {
-        wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
-                                        src_port, dst_port, proto);
+    } else if (proto == IPPROTO_TCP) {
+        wan_dp = dp_tcp_bond_tx_prepare(
+            fwd, profile_idx, flow_ok, src_ip, dst_ip, src_port, dst_port,
+            cp->action == POLICY_ACTION_ENCRYPT_L2);
+    } else if (proto == IPPROTO_UDP) {
+        wan_dp = dp_udp_bond_tx_prepare(
+            fwd, profile_idx, flow_ok, src_ip, dst_ip, src_port, dst_port,
+            cp->action == POLICY_ACTION_ENCRYPT_L2, pkt, job.len);
     }
     if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
         goto drop;
 
     if (cp->action == POLICY_ACTION_BYPASS) {
-        int sent;
-
         ne_dp_stats_local_bypass(1);
-        sent = push_to_wan(fwd, &job, wan_dp) == 0;
-        complete_udp_window_after_enqueue(proto, sent);
+        (void)push_to_wan(fwd, &job, wan_dp);
         return;
     }
     if (!fwd->cfg->crypto_enabled)
@@ -266,13 +246,10 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
     if (proto == IPPROTO_TCP) {
         uint32_t len = job.len;
-        int bonded = tcp_bond_active(fwd, profile_idx);
 
         /* TCP never uses the UDP splitter. Reuse the offset already parsed
          * for policy/MSS and call the exact same L2 wire encoder directly. */
-        if (bonded)
-            dp_out_ring_bind(dp_crypto_worker_tx_slot(dp_crypto_current_worker_idx()));
-        enc = crypto_l2_pqc_encrypt_tcp_l3(pctx, pkt, &len, l3_off, bonded);
+        enc = dp_tcp_bond_tx_encrypt(pctx, pkt, &len, l3_off);
         if (enc == 0)
             job.len = len;
     } else {
@@ -282,18 +259,12 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (enc < 0)
         goto drop;
     if (enc > 0) {
-        complete_udp_window_after_enqueue(proto, 1);
         return;
     }
-    {
-        int sent = push_to_wan(fwd, &job, wan_dp) == 0;
-
-        complete_udp_window_after_enqueue(proto, sent);
-    }
+    (void)push_to_wan(fwd, &job, wan_dp);
     return;
 
 drop:
-    complete_udp_window_after_enqueue(proto, 0);
     ne_dp_stats_local_drop(1);
     ne_frame_free(&fwd->pair, job.addr);
 }

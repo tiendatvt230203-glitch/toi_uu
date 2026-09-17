@@ -11,9 +11,10 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/flow/mac_learn.h"
-#include "../../../inc/core/flow/flow_table.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/dataplane/tcp_bond_reorder.h"
+#include "../../../inc/core/dataplane/udp_reorder.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 
 #include <net/if.h>
@@ -270,7 +271,6 @@ static void *local_rx_thread(void *arg)
     struct ne_dp_idle idle = {0};
 
     pin_cpu(ctx->cpu_id);
-    (void)flow_table_thread_init();
 
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         dp_burst_refill_local(fwd, ctx->rx_slot);
@@ -323,7 +323,6 @@ static void *local_rx_thread(void *arg)
         }
         ne_recv_release_local_slot(&fwd->pair, ctx->rx_slot);
     }
-    flow_table_thread_cleanup();
     return NULL;
 }
 
@@ -489,7 +488,6 @@ static void *crypto_worker_thread(void *arg)
     dp_crypto_worker_bind(ctx->worker_idx);
     crypto_option_bind_worker_idx((uint8_t)ctx->worker_idx);
     crypto_l2_pqc_bind_pair(&fwd->pair);
-    (void)flow_table_thread_init();
 
     /* Encrypt / decrypt / reasm only. Bypass never queues here. */
     while (atomic_load_explicit(&running, memory_order_acquire)) {
@@ -519,8 +517,8 @@ static void *crypto_worker_thread(void *arg)
         }
         if (crypto_on && ++gc_tick >= 2048) {
             fwd_crypto_frag_gc_worker_tick(ctx->worker_idx);
-            dataplane_udp_reorder_gc(fwd, ctx->worker_idx);
-            dataplane_tcp_bond_reorder_gc(fwd);
+            dp_udp_bond_runtime_gc(fwd, ctx->worker_idx);
+            dp_tcp_bond_runtime_gc(fwd, ctx->worker_idx);
             gc_tick = 0;
         }
 
@@ -529,10 +527,9 @@ static void *crypto_worker_thread(void *arg)
         else
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
-    dataplane_udp_reorder_reset(fwd, ctx->worker_idx);
-    dataplane_tcp_bond_reorder_reset(fwd);
+    dp_udp_bond_runtime_reset(fwd, ctx->worker_idx);
+    dp_tcp_bond_runtime_reset(fwd, ctx->worker_idx);
     packet_crypto_worker_cleanup();
-    flow_table_thread_cleanup();
     return NULL;
 }
 
@@ -549,8 +546,8 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     }
 
     memset(fwd, 0, sizeof(*fwd));
-    dataplane_udp_reorder_configure();
-    dataplane_tcp_bond_reorder_configure();
+    dp_udp_reorder_configure_from_env();
+    dp_tcp_bond_reorder_configure_from_env();
     fwd->cfg = cfg;
     fwd->local_count = cfg->local_count;
     fwd->wan_count = config_count_dataplane_wans(cfg);

@@ -5,6 +5,7 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/util/cpu_map.h"
 #include "../../../inc/core/dataplane/tcp_bond_reorder.h"
+#include "../../../inc/core/dataplane/udp_reorder.h"
 #include "../../options/common/opt_no_frag_ops.h"
 
 #include <string.h>
@@ -541,7 +542,7 @@ static int l2_do_encrypt_udp(struct packet_crypto_ctx *ctx, uint8_t *packet,
     int new_len = 0;
 
     if (l3_off < 0 || et_off < 0 ||
-        crypto_option_udp_tx_meta(&epoch, &seq, &datagram_id) != 0)
+        dp_udp_bond_tx_meta(&epoch, &seq, &datagram_id) != 0)
         return -1;
     payload_len = pkt_len - (size_t)l3_off;
     magic_off = et_off + 2 + L2_POLICY_LEN + L2_CORE_ID_LEN + L2_NONCE_SIZE;
@@ -834,7 +835,7 @@ static int l2_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t p
     if (half1 >= app_len)
         half1 = app_len - 1;
     half2 = app_len - half1;
-    if (crypto_option_udp_tx_meta(&epoch, &seq, &datagram_id) != 0)
+    if (dp_udp_bond_tx_meta(&epoch, &seq, &datagram_id) != 0)
         return -1;
     if (transport_hdr_len >= 0)
         frag0_plain_len = (uint32_t)ip_hdr_len + (uint32_t)transport_hdr_len + half1;
@@ -953,7 +954,7 @@ static int l2_udp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
     if (n < 0 || kind != L2_UDP_KIND_FULL || !crypto_pkt_is_ipv4(pkt, (size_t)n))
         return -1;
     *pkt_len = (uint32_t)n;
-    crypto_option_udp_set_rx_meta(epoch, seq);
+    dp_udp_bond_set_rx_meta(epoch, seq);
     return 0;
 }
 static int l2_udp_need_split(uint32_t pkt_len)
@@ -1021,7 +1022,7 @@ static int l2_udp_reasm(int profile_slot, int worker_idx, struct packet_crypto_c
         if (out_buf != pkt_data)
             memcpy(out_buf, pkt_data, *pkt_len);
         *out_len = *pkt_len;
-        crypto_option_udp_set_rx_meta(epoch, seq);
+        dp_udp_bond_set_rx_meta(epoch, seq);
         return 1;
     }
     if (kind > L2_UDP_KIND_FRAG1)
@@ -1033,7 +1034,7 @@ static int l2_udp_reasm(int profile_slot, int worker_idx, struct packet_crypto_c
                        epoch, datagram_id, seq, kind, out_buf, out_len);
     if (rr == 1) {
         *pkt_len = *out_len;
-        crypto_option_udp_set_rx_meta(epoch, seq);
+        dp_udp_bond_set_rx_meta(epoch, seq);
     }
     return rr;
 }
@@ -1138,7 +1139,7 @@ static int l2_tcp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     if (n < 0 || !crypto_pkt_is_ipv4(pkt, (size_t)n))
         return -1;
     *pkt_len = (uint32_t)n;
-    crypto_option_tcp_set_rx_meta(epoch, seq);
+    dp_tcp_bond_set_rx_meta(epoch, seq);
     return 0;
 }
 

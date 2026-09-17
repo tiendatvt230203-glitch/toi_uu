@@ -10,12 +10,8 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job);
 int dataplane_local_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t len,
                               int local_idx);
 int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t len);
-
-void dataplane_udp_reorder_configure(void);
-void dataplane_udp_reorder_gc(struct forwarder *fwd, int worker_idx);
-void dataplane_udp_reorder_reset(struct forwarder *fwd, int worker_idx);
-void dataplane_tcp_bond_reorder_configure(void);
-void dataplane_tcp_bond_reorder_gc(struct forwarder *fwd);
-void dataplane_tcp_bond_reorder_reset(struct forwarder *fwd);
+int dataplane_forward_wan_to_local(struct forwarder *fwd,
+                                   struct ne_packet *job, int profile_pi,
+                                   int ingress_wan_dp);
 
 #endif

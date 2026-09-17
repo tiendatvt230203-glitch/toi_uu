@@ -1,12 +1,427 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "../../../inc/core/dataplane/udp_reorder.h"
+#include "../../../inc/core/dataplane/dataplane.h"
+#include "../../../inc/core/dataplane/dataplane_util.h"
+#include "../../../inc/core/dataplane/dataplane_stats.h"
+#include "../../../inc/core/dataplane/crypto_route.h"
+#include "../../../inc/core/forwarder/forwarder_wan.h"
 #include "../../../inc/core/util/cpu_map.h"
-
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <time.h>
+#include <unistd.h>
+
+/* Change this one line to 1 to test UDP per-packet bonding. Default: per-flow. */
+#define UDP_BOND_PER_PACKET 0
+
+struct dp_udp_reorder_key {
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+};
+
+struct dp_udp_reorder_item {
+    struct ne_packet packet;
+    int16_t profile_pi;
+    int8_t ingress_wan_dp;
+};
+
+struct dp_udp_reorder_ops {
+    void *ctx;
+    int (*emit)(void *ctx, struct dp_udp_reorder_item *item);
+    void (*drop)(void *ctx, struct dp_udp_reorder_item *item);
+};
+
+static uint64_t dp_udp_reorder_now_ns(void);
+static void dp_udp_reorder_submit(int worker_idx,
+                                  const struct dp_udp_reorder_key *key,
+                                  uint32_t epoch, uint32_t seq,
+                                  struct dp_udp_reorder_item *item,
+                                  uint64_t now_ns,
+                                  const struct dp_udp_reorder_ops *ops);
+static void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
+                              const struct dp_udp_reorder_ops *ops);
+static void dp_udp_reorder_reset_worker(
+    int worker_idx, const struct dp_udp_reorder_ops *ops);
+
+struct udp_packet_picker {
+    int wans[MAX_INTERFACES];
+    int weights[MAX_INTERFACES];
+    int64_t current[MAX_INTERFACES];
+    int count;
+    int tie;
+};
+
+static _Thread_local struct udp_packet_picker g_packet_picker;
+
+#define UDP_TX_SEQ_SETS 2048u
+#define UDP_TX_SEQ_WAYS 4u
+
+struct udp_tx_seq_entry {
+    struct dp_udp_reorder_key key;
+    uint32_t next_seq;
+    uint32_t stamp;
+    uint8_t valid;
+};
+
+static atomic_uint_fast32_t g_tx_epoch;
+
+struct udp_worker_state {
+    struct udp_tx_seq_entry sequences[UDP_TX_SEQ_SETS][UDP_TX_SEQ_WAYS];
+    uint32_t sequence_stamp;
+    uint32_t tx_seq;
+    uint32_t tx_datagram_id;
+    uint32_t tx_datagram_clock;
+    uint32_t rx_epoch;
+    uint32_t rx_seq;
+    uint8_t tx_meta_valid;
+    uint8_t rx_meta_valid;
+};
+
+static _Thread_local struct udp_worker_state g_worker_state;
+
+static uint32_t key_hash(const struct dp_udp_reorder_key *key);
+
+static uint32_t udp_tx_epoch(void)
+{
+    uint32_t epoch = (uint32_t)atomic_load_explicit(&g_tx_epoch,
+                                                    memory_order_acquire);
+
+    if (epoch)
+        return epoch;
+    if (getrandom(&epoch, sizeof(epoch), GRND_NONBLOCK) != (ssize_t)sizeof(epoch) ||
+        epoch == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        epoch = (uint32_t)ts.tv_nsec ^ (uint32_t)ts.tv_sec ^
+            ((uint32_t)getpid() * 0x9e3779b9u);
+        if (!epoch)
+            epoch = 1u;
+    }
+    {
+        uint_fast32_t expected = 0;
+        if (!atomic_compare_exchange_strong_explicit(&g_tx_epoch, &expected,
+                                                      epoch,
+                                                      memory_order_release,
+                                                      memory_order_acquire))
+            epoch = (uint32_t)expected;
+    }
+    return epoch;
+}
+
+static int udp_next_tx_seq(const uint8_t *packet, uint32_t packet_len,
+                           uint32_t *seq_out)
+{
+    struct dp_udp_reorder_key key;
+    struct udp_tx_seq_entry *set;
+    uint8_t proto = 0;
+    uint32_t hash;
+    int victim = 0;
+
+    if (!packet || !seq_out ||
+        dp_parse_flow((void *)packet, packet_len, &key.src_ip, &key.dst_ip,
+                      &key.src_port, &key.dst_port, &proto) != 0 ||
+        proto != IPPROTO_UDP)
+        return -1;
+    hash = key_hash(&key);
+    set = g_worker_state.sequences[hash & (UDP_TX_SEQ_SETS - 1u)];
+    for (int way = 0; way < (int)UDP_TX_SEQ_WAYS; way++) {
+        if (set[way].valid &&
+            memcmp(&set[way].key, &key, sizeof(key)) == 0) {
+            set[way].stamp = ++g_worker_state.sequence_stamp;
+            *seq_out = set[way].next_seq++;
+            return 0;
+        }
+        if (!set[way].valid) {
+            victim = way;
+            continue;
+        }
+        if (set[way].stamp < set[victim].stamp)
+            victim = way;
+    }
+    set[victim].key = key;
+    set[victim].next_seq = 1u;
+    set[victim].stamp = ++g_worker_state.sequence_stamp;
+    set[victim].valid = 1u;
+    *seq_out = 0u;
+    return 0;
+}
+
+int dp_udp_bond_tx_meta(uint32_t *epoch, uint32_t *seq,
+                        uint32_t *datagram_id)
+{
+    if (!epoch || !seq || !datagram_id || !g_worker_state.tx_meta_valid)
+        return -1;
+    *epoch = udp_tx_epoch();
+    *seq = g_worker_state.tx_seq;
+    *datagram_id = g_worker_state.tx_datagram_id;
+    return 0;
+}
+
+void dp_udp_bond_clear_rx_meta(void)
+{
+    g_worker_state.rx_meta_valid = 0u;
+}
+
+void dp_udp_bond_set_rx_meta(uint32_t epoch, uint32_t seq)
+{
+    g_worker_state.rx_epoch = epoch;
+    g_worker_state.rx_seq = seq;
+    g_worker_state.rx_meta_valid = 1u;
+}
+
+int dp_udp_bond_take_rx_meta(uint32_t *epoch, uint32_t *seq)
+{
+    if (!epoch || !seq || !g_worker_state.rx_meta_valid)
+        return -1;
+    *epoch = g_worker_state.rx_epoch;
+    *seq = g_worker_state.rx_seq;
+    g_worker_state.rx_meta_valid = 0u;
+    return 0;
+}
+
+static int udp_select_per_flow(uint32_t src_ip, uint32_t dst_ip,
+                               uint16_t src_port, uint16_t dst_port,
+                               uint8_t proto, const int *wans,
+                               const int *weights, int count)
+{
+    uint32_t a = ntohl(src_ip);
+    uint32_t b = ntohl(dst_ip);
+    uint32_t hash;
+    uint64_t total = 0;
+    uint64_t choice;
+
+    if (a > b || (a == b && src_port > dst_port)) {
+        uint32_t tmp_ip = src_ip;
+        uint16_t tmp_port = src_port;
+        src_ip = dst_ip;
+        dst_ip = tmp_ip;
+        src_port = dst_port;
+        dst_port = tmp_port;
+    }
+    hash = src_ip ^ dst_ip ^ ((uint32_t)src_port << 16) ^ dst_port ^ proto;
+    hash ^= hash >> 16;
+    hash *= 0x85ebca6bu;
+    hash ^= hash >> 13;
+    hash *= 0xc2b2ae35u;
+    hash ^= hash >> 16;
+    for (int i = 0; i < count; i++)
+        if (weights[i] > 0)
+            total += (uint32_t)weights[i];
+    if (!total)
+        return -1;
+    choice = hash % total;
+    for (int i = 0; i < count; i++) {
+        if (weights[i] <= 0)
+            continue;
+        if (choice < (uint32_t)weights[i])
+            return wans[i];
+        choice -= (uint32_t)weights[i];
+    }
+    return -1;
+}
+
+static int udp_select_per_packet(uint32_t src_ip, uint32_t dst_ip,
+                                 uint16_t src_port, uint16_t dst_port,
+                                 uint8_t proto, const int *wans,
+                                 const int *weights, int count)
+{
+    int64_t total = 0;
+    int64_t best_value = INT64_MIN;
+    int best = -1;
+    int changed = count != g_packet_picker.count;
+
+    (void)src_ip;
+    (void)dst_ip;
+    (void)src_port;
+    (void)dst_port;
+    (void)proto;
+    for (int i = 0; !changed && i < count; i++)
+        changed = g_packet_picker.wans[i] != wans[i] ||
+            g_packet_picker.weights[i] != weights[i];
+    if (changed) {
+        memset(&g_packet_picker, 0, sizeof(g_packet_picker));
+        g_packet_picker.count = count;
+        for (int i = 0; i < count; i++) {
+            g_packet_picker.wans[i] = wans[i];
+            g_packet_picker.weights[i] = weights[i];
+        }
+    }
+    for (int i = 0; i < count; i++) {
+        if (weights[i] <= 0)
+            continue;
+        g_packet_picker.current[i] += weights[i];
+        total += weights[i];
+    }
+    for (int off = 0; off < count; off++) {
+        int i = (g_packet_picker.tie + off) % count;
+        if (weights[i] > 0 &&
+            (best < 0 || g_packet_picker.current[i] > best_value)) {
+            best = i;
+            best_value = g_packet_picker.current[i];
+        }
+    }
+    if (best < 0)
+        return -1;
+    g_packet_picker.current[best] -= total;
+    g_packet_picker.tie = (best + 1) % count;
+    return wans[best];
+}
+
+static int udp_resolve_selected_wan(struct forwarder *fwd, int selected_cfg,
+                                    const int *wans, int count, int per_packet)
+{
+    int selected = fwd_wan_resolve_cfg(fwd, selected_cfg);
+    int best = -1;
+    uint32_t best_depth = UINT32_MAX;
+
+    if (!per_packet || (selected >= 0 && fwd_wan_has_tx_room(fwd, selected)))
+        return selected;
+    for (int i = 0; i < count; i++) {
+        int dp = fwd_wan_resolve_cfg(fwd, wans[i]);
+        uint32_t depth;
+
+        if (dp < 0 || !fwd_wan_has_tx_room(fwd, dp))
+            continue;
+        depth = fwd_mid_to_wan_depth(fwd, dp);
+        if (best < 0 || depth < best_depth) {
+            best = dp;
+            best_depth = depth;
+        }
+    }
+    return best >= 0 ? best : selected;
+}
+
+int dp_udp_bond_tx_prepare(struct forwarder *fwd, int profile_idx, int flow_ok,
+                           uint32_t src_ip, uint32_t dst_ip,
+                           uint16_t src_port, uint16_t dst_port,
+                           int feature_allowed, const uint8_t *packet,
+                           uint32_t packet_len)
+{
+    int wans[MAX_INTERFACES];
+    int weights[MAX_INTERFACES];
+    int count;
+    int wan_cfg;
+    uint32_t seq;
+    int per_packet;
+
+    if (!fwd || !fwd->cfg)
+        return -1;
+    count = fwd_wan_build_profile_pool(fwd, fwd->cfg, wans, weights,
+                                       MAX_INTERFACES);
+    if (count <= 0)
+        return -1;
+    per_packet = feature_allowed && UDP_BOND_PER_PACKET && count > 1;
+
+    /* The authenticated UDP wire shim is prepared here for both modes.
+     * In per-flow mode RX emits immediately; in per-packet mode RX reorders. */
+    if (feature_allowed &&
+        (!flow_ok || !packet ||
+         udp_next_tx_seq(packet, packet_len, &seq) != 0))
+        return -1;
+    if (feature_allowed) {
+        g_worker_state.tx_seq = seq;
+        g_worker_state.tx_datagram_id = g_worker_state.tx_datagram_clock++;
+        g_worker_state.tx_meta_valid = 1u;
+    }
+    wan_cfg = flow_ok
+        ? (per_packet
+            ? udp_select_per_packet(src_ip, dst_ip, src_port, dst_port,
+                                    IPPROTO_UDP, wans, weights, count)
+            : udp_select_per_flow(src_ip, dst_ip, src_port, dst_port,
+                                  IPPROTO_UDP, wans, weights, count))
+        : wans[0];
+    (void)profile_idx;
+    return udp_resolve_selected_wan(fwd, wan_cfg, wans, count, per_packet);
+}
+
+static int udp_bond_emit(void *ctx, struct dp_udp_reorder_item *item)
+{
+    struct forwarder *fwd = ctx;
+    uint8_t *pkt;
+    int rc;
+
+    if (!fwd || !item)
+        return -1;
+    pkt = ne_packet_data(&fwd->pair, item->packet.addr);
+    if (!pkt)
+        return -1;
+    dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, item->packet.len,
+                                          dp_crypto_current_worker_idx()));
+    rc = dataplane_forward_wan_to_local(fwd, &item->packet, item->profile_pi,
+                                         item->ingress_wan_dp);
+    if (rc < 0)
+        return -1;
+    if (rc == 0)
+        ne_dp_stats_wan_fwd(1);
+    return 0;
+}
+
+static void udp_bond_drop(void *ctx, struct dp_udp_reorder_item *item)
+{
+    struct forwarder *fwd = ctx;
+
+    if (!fwd || !item)
+        return;
+    ne_dp_stats_wan_drop(1);
+    ne_frame_free(&fwd->pair, item->packet.addr);
+}
+
+static struct dp_udp_reorder_ops udp_bond_ops(struct forwarder *fwd)
+{
+    struct dp_udp_reorder_ops ops = {
+        .ctx = fwd,
+        .emit = udp_bond_emit,
+        .drop = udp_bond_drop,
+    };
+    return ops;
+}
+
+void dp_udp_bond_rx(struct forwarder *fwd, uint32_t epoch, uint32_t seq,
+                    struct ne_packet packet, int profile_pi,
+                    int ingress_wan_dp)
+{
+    struct dp_udp_reorder_key key;
+    struct dp_udp_reorder_item item;
+    struct dp_udp_reorder_ops ops = udp_bond_ops(fwd);
+    uint8_t *pkt;
+    uint8_t proto = 0;
+
+    if (!fwd)
+        return;
+    pkt = ne_packet_data(&fwd->pair, packet.addr);
+    if (!pkt || dp_parse_flow(pkt, packet.len, &key.src_ip, &key.dst_ip,
+                              &key.src_port, &key.dst_port, &proto) != 0 ||
+        proto != IPPROTO_UDP) {
+        ne_dp_stats_wan_drop(1);
+        ne_frame_free(&fwd->pair, packet.addr);
+        return;
+    }
+    memset(&item, 0, sizeof(item));
+    item.packet = packet;
+    item.profile_pi = (int16_t)profile_pi;
+    item.ingress_wan_dp = (int8_t)ingress_wan_dp;
+    dp_udp_reorder_submit(dp_crypto_current_worker_idx(), &key, epoch, seq,
+                          &item, dp_udp_reorder_now_ns(), &ops);
+}
+
+void dp_udp_bond_runtime_gc(struct forwarder *fwd, int worker_idx)
+{
+    struct dp_udp_reorder_ops ops = udp_bond_ops(fwd);
+    dp_udp_reorder_gc(worker_idx, dp_udp_reorder_now_ns(), &ops);
+}
+
+void dp_udp_bond_runtime_reset(struct forwarder *fwd, int worker_idx)
+{
+    struct dp_udp_reorder_ops ops = udp_bond_ops(fwd);
+    dp_udp_reorder_reset_worker(worker_idx, &ops);
+}
 
 #define UDP_REORDER_SETS              2048u
 #define UDP_REORDER_WAYS              4u
@@ -404,7 +819,7 @@ void dp_udp_reorder_configure_from_env(void)
     const char *enabled = getenv("NE_UDP_REORDER");
     const char *hold_us = getenv("NE_UDP_REORDER_US");
 
-    g_enabled = !(enabled && enabled[0] == '0');
+    g_enabled = UDP_BOND_PER_PACKET && !(enabled && enabled[0] == '0');
     if (hold_us && hold_us[0]) {
         char *end = NULL;
         unsigned long value = strtoul(hold_us, &end, 10);
@@ -419,7 +834,7 @@ void dp_udp_reorder_configure_from_env(void)
     }
 }
 
-uint64_t dp_udp_reorder_now_ns(void)
+static uint64_t dp_udp_reorder_now_ns(void)
 {
     struct timespec ts;
 
@@ -427,12 +842,12 @@ uint64_t dp_udp_reorder_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-void dp_udp_reorder_submit(int worker_idx,
-                           const struct dp_udp_reorder_key *key,
-                           uint32_t epoch, uint32_t seq,
-                           struct dp_udp_reorder_item *item,
-                           uint64_t now_ns,
-                           const struct dp_udp_reorder_ops *ops)
+static void dp_udp_reorder_submit(int worker_idx,
+                                  const struct dp_udp_reorder_key *key,
+                                  uint32_t epoch, uint32_t seq,
+                                  struct dp_udp_reorder_item *item,
+                                  uint64_t now_ns,
+                                  const struct dp_udp_reorder_ops *ops)
 {
     uint32_t flow_idx;
     struct udp_reorder_flow *flow;
@@ -501,8 +916,8 @@ void dp_udp_reorder_submit(int worker_idx,
     update_high_water(g_held_by_worker[worker_idx]);
 }
 
-void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
-                       const struct dp_udp_reorder_ops *ops)
+static void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
+                              const struct dp_udp_reorder_ops *ops)
 {
     uint32_t cursor;
 
@@ -527,8 +942,8 @@ void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
         UDP_REORDER_FLOW_CAP;
 }
 
-void dp_udp_reorder_reset_worker(int worker_idx,
-                                 const struct dp_udp_reorder_ops *ops)
+static void dp_udp_reorder_reset_worker(
+    int worker_idx, const struct dp_udp_reorder_ops *ops)
 {
     if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
         return;

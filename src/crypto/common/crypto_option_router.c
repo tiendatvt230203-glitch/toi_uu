@@ -3,9 +3,6 @@
 
 #include <netinet/in.h>
 #include <stdatomic.h>
-#include <sys/random.h>
-#include <time.h>
-#include <unistd.h>
 
 /* ===================== worker bind ===================== */
 
@@ -37,112 +34,6 @@ crypto_proto_class crypto_proto_classify(uint8_t ip_proto)
 /* ===================== option router ===================== */
 
 static atomic_uint_fast32_t g_opt_frag_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
-static atomic_uint_fast32_t g_udp_epoch;
-static __thread uint32_t g_udp_tx_seq;
-static __thread uint32_t g_udp_tx_datagram_id;
-static __thread uint32_t g_udp_tx_datagram_clock;
-static __thread uint32_t g_udp_rx_epoch;
-static __thread uint32_t g_udp_rx_seq;
-static __thread uint8_t g_udp_tx_valid;
-static __thread uint8_t g_udp_rx_valid;
-static __thread uint32_t g_tcp_rx_epoch;
-static __thread uint32_t g_tcp_rx_seq;
-static __thread uint8_t g_tcp_rx_valid;
-
-static uint32_t crypto_option_random_epoch(atomic_uint_fast32_t *storage)
-{
-    uint32_t epoch = (uint32_t)atomic_load_explicit(storage,
-                                                    memory_order_acquire);
-
-    if (epoch != 0)
-        return epoch;
-    if (getrandom(&epoch, sizeof(epoch), GRND_NONBLOCK) != (ssize_t)sizeof(epoch) ||
-        epoch == 0) {
-        struct timespec ts;
-
-        clock_gettime(CLOCK_REALTIME, &ts);
-        epoch = (uint32_t)ts.tv_nsec ^ (uint32_t)ts.tv_sec ^
-            ((uint32_t)getpid() * 0x9e3779b9u);
-        if (epoch == 0)
-            epoch = 1u;
-    }
-    {
-        uint_fast32_t expected = 0;
-
-        if (!atomic_compare_exchange_strong_explicit(storage, &expected, epoch,
-                                                      memory_order_release,
-                                                      memory_order_acquire))
-            epoch = (uint32_t)expected;
-    }
-    return epoch;
-}
-
-static uint32_t crypto_option_udp_epoch(void)
-{
-    return crypto_option_random_epoch(&g_udp_epoch);
-}
-
-void crypto_option_udp_set_tx_seq(uint32_t seq)
-{
-    g_udp_tx_seq = seq;
-    g_udp_tx_datagram_id = g_udp_tx_datagram_clock++;
-    g_udp_tx_valid = 1u;
-}
-
-int crypto_option_udp_tx_meta(uint32_t *epoch, uint32_t *seq,
-                              uint32_t *datagram_id)
-{
-    if (!epoch || !seq || !datagram_id || !g_udp_tx_valid)
-        return -1;
-    *epoch = crypto_option_udp_epoch();
-    *seq = g_udp_tx_seq;
-    *datagram_id = g_udp_tx_datagram_id;
-    return 0;
-}
-
-void crypto_option_udp_clear_rx_meta(void)
-{
-    g_udp_rx_valid = 0u;
-}
-
-void crypto_option_udp_set_rx_meta(uint32_t epoch, uint32_t seq)
-{
-    g_udp_rx_epoch = epoch;
-    g_udp_rx_seq = seq;
-    g_udp_rx_valid = 1u;
-}
-
-int crypto_option_udp_take_rx_meta(uint32_t *epoch, uint32_t *seq)
-{
-    if (!epoch || !seq || !g_udp_rx_valid)
-        return -1;
-    *epoch = g_udp_rx_epoch;
-    *seq = g_udp_rx_seq;
-    g_udp_rx_valid = 0u;
-    return 0;
-}
-
-void crypto_option_tcp_clear_rx_meta(void)
-{
-    g_tcp_rx_valid = 0u;
-}
-
-void crypto_option_tcp_set_rx_meta(uint32_t epoch, uint32_t seq)
-{
-    g_tcp_rx_epoch = epoch;
-    g_tcp_rx_seq = seq;
-    g_tcp_rx_valid = 1u;
-}
-
-int crypto_option_tcp_take_rx_meta(uint32_t *epoch, uint32_t *seq)
-{
-    if (!epoch || !seq || !g_tcp_rx_valid)
-        return -1;
-    *epoch = g_tcp_rx_epoch;
-    *seq = g_tcp_rx_seq;
-    g_tcp_rx_valid = 0u;
-    return 0;
-}
 
 void crypto_option_set_mtu(uint32_t mtu)
 {
