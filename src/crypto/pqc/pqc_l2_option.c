@@ -5,7 +5,6 @@
 #include "../../../inc/core/util/cpu_map.h"
 #include "../../../inc/core/dataplane/tcp_bond_reorder.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
-#include "../options/common/opt_no_frag_ops.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -19,6 +18,8 @@
 #define ETH_P_ARP               0x0806u
 #define MIN_ETH_PKT             (ETH_HEADER_SIZE + 8)
 #define unlikely(x)             __builtin_expect(!!(x), 0)
+
+static __thread uint8_t g_pqc_worker_idx;
 
 static uint16_t l2_read_ethertype(const uint8_t *packet, int offset)
 {
@@ -534,7 +535,7 @@ static void l2_write_wire_header_et(uint8_t *packet, int et_off, uint16_t fake,
     packet[et_off] = (uint8_t)(fake >> 8);
     packet[et_off + 1] = (uint8_t)(fake & 0xFF);
     packet[et_off + 2] = policy_id;
-    packet[et_off + 3] = crypto_option_worker_idx();
+    packet[et_off + 3] = g_pqc_worker_idx;
     memcpy(packet + et_off + 4, nonce, (size_t)nonce_size);
 }
 
@@ -641,7 +642,7 @@ static int l2_do_encrypt_tcp(struct packet_crypto_ctx *ctx, uint8_t *packet,
     size_t plain_len;
 
     if (!ctx || l3_off < 2 || (size_t)l3_off > pkt_len ||
-        dp_tcp_bond_next_tx_meta(ctx->wire_id, crypto_option_worker_idx(),
+        dp_tcp_bond_next_tx_meta(ctx->wire_id, g_pqc_worker_idx,
                                  &epoch, &seq) != 0)
         return -1;
     et_off = l3_off - 2;
@@ -1314,9 +1315,32 @@ static int l2_arp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     return 0;
 }
 
-CRYPTO_OPS_PLAIN(crypto_opt_l2_pqc_tcp_ops, l2_tcp_encrypt, l2_tcp_decrypt)
-CRYPTO_OPS_PLAIN(crypto_opt_l2_pqc_ospf_ops, l2_ip_encrypt, l2_ip_decrypt)
-CRYPTO_OPS_PLAIN(crypto_opt_l2_pqc_arp_ops, l2_arp_encrypt, l2_arp_decrypt)
+const struct crypto_option_ops *crypto_opt_l2_pqc_tcp_ops(void)
+{
+    static const struct crypto_option_ops ops = {
+        .encrypt = l2_tcp_encrypt,
+        .decrypt = l2_tcp_decrypt,
+    };
+    return &ops;
+}
+
+const struct crypto_option_ops *crypto_opt_l2_pqc_ospf_ops(void)
+{
+    static const struct crypto_option_ops ops = {
+        .encrypt = l2_ip_encrypt,
+        .decrypt = l2_ip_decrypt,
+    };
+    return &ops;
+}
+
+const struct crypto_option_ops *crypto_opt_l2_pqc_arp_ops(void)
+{
+    static const struct crypto_option_ops ops = {
+        .encrypt = l2_arp_encrypt,
+        .decrypt = l2_arp_decrypt,
+    };
+    return &ops;
+}
 
 const struct crypto_option_ops *crypto_opt_l2_pqc_udp_ops(void)
 {
@@ -1619,4 +1643,126 @@ const struct crypto_option_ops *crypto_opt_l2_pqc_icmp_ops(void)
     };
 
     return &ops;
+}
+
+void crypto_l2_pqc_bind_worker_idx(uint8_t worker_idx)
+{
+    g_pqc_worker_idx = worker_idx;
+    crypto_option_bind_worker_idx(worker_idx);
+}
+
+int crypto_l2_pqc_encrypt_plain(struct packet_crypto_ctx *ctx,
+                                uint8_t *packet, uint32_t *packet_len)
+{
+    return l2_ip_encrypt(ctx, packet, packet_len);
+}
+
+int crypto_l2_pqc_decrypt_plain(struct packet_crypto_ctx *ctx,
+                                uint8_t *packet, uint32_t *packet_len)
+{
+    return l2_ip_decrypt(ctx, packet, packet_len);
+}
+
+int crypto_l2_pqc_decrypt_tcp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len)
+{
+    return l2_tcp_decrypt(ctx, packet, packet_len);
+}
+
+int crypto_l2_pqc_encrypt_tcp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len)
+{
+    return l2_tcp_encrypt(ctx, packet, packet_len);
+}
+
+int crypto_l2_pqc_encrypt_arp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len)
+{
+    return l2_arp_encrypt(ctx, packet, packet_len);
+}
+
+int crypto_l2_pqc_decrypt_arp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len)
+{
+    return l2_arp_decrypt(ctx, packet, packet_len);
+}
+
+int crypto_l2_pqc_udp_need_split(uint32_t packet_len)
+{
+    return l2_udp_need_split(packet_len);
+}
+
+int crypto_l2_pqc_udp_split(struct packet_crypto_ctx *ctx,
+                            uint8_t *packet, uint32_t packet_len,
+                            size_t first_max, uint32_t *first_len,
+                            uint8_t *second, size_t second_max,
+                            uint32_t *second_len)
+{
+    return l2_udp_split(ctx, packet, packet_len, first_max, first_len,
+                        second, second_max, second_len);
+}
+
+int crypto_l2_pqc_encrypt_udp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len)
+{
+    return l2_udp_encrypt(ctx, packet, packet_len);
+}
+
+int crypto_l2_pqc_udp_is_fragment(const struct app_config *cfg,
+                                  const uint8_t *packet, uint32_t packet_len,
+                                  uint16_t *packet_id, uint8_t *fragment_index)
+{
+    return l2_udp_is_fragment(cfg, packet, packet_len, packet_id,
+                              fragment_index);
+}
+
+int crypto_l2_pqc_udp_reassemble(int profile_slot, int worker_idx,
+                                 struct packet_crypto_ctx *ctx,
+                                 uint8_t *packet, uint32_t *packet_len,
+                                 uint8_t *out, uint32_t *out_len)
+{
+    return l2_udp_reasm(profile_slot, worker_idx, ctx, packet, packet_len,
+                        out, out_len);
+}
+
+void crypto_l2_pqc_udp_gc(int profile_slot, int worker_idx, uint64_t now_ns)
+{
+    l2_udp_frag_gc(profile_slot, worker_idx, now_ns);
+}
+
+int crypto_l2_pqc_icmp_need_split(uint32_t packet_len)
+{
+    return l2_icmp_need_split(packet_len);
+}
+
+int crypto_l2_pqc_icmp_split(struct packet_crypto_ctx *ctx,
+                             uint8_t *packet, uint32_t packet_len,
+                             size_t first_max, uint32_t *first_len,
+                             uint8_t *second, size_t second_max,
+                             uint32_t *second_len)
+{
+    return l2_icmp_split(ctx, packet, packet_len, first_max, first_len,
+                         second, second_max, second_len);
+}
+
+int crypto_l2_pqc_icmp_is_fragment(const struct app_config *cfg,
+                                   const uint8_t *packet, uint32_t packet_len,
+                                   uint16_t *packet_id, uint8_t *fragment_index)
+{
+    return l2_icmp_is_fragment(cfg, packet, packet_len, packet_id,
+                               fragment_index);
+}
+
+int crypto_l2_pqc_icmp_reassemble(int profile_slot, int worker_idx,
+                                  struct packet_crypto_ctx *ctx,
+                                  uint8_t *packet, uint32_t *packet_len,
+                                  uint8_t *out, uint32_t *out_len)
+{
+    return l2_icmp_reasm(profile_slot, worker_idx, ctx, packet, packet_len,
+                         out, out_len);
+}
+
+void crypto_l2_pqc_icmp_gc(int profile_slot, int worker_idx, uint64_t now_ns)
+{
+    l2_icmp_frag_gc(profile_slot, worker_idx, now_ns);
 }

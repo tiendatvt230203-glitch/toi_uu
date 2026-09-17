@@ -101,4 +101,50 @@ void crypto_option_frag_gc(crypto_option_id id, crypto_proto_class proto,
                            int profile_slot, int worker_idx, uint64_t now_ns);
 void crypto_option_frag_gc_all(int profile_slot, int worker_idx, uint64_t now_ns);
 
+/* Direct single-PQC APIs. Callers select their own protocol path; these
+ * replace the option router without changing the L2 wire format. */
+void crypto_l2_pqc_bind_worker_idx(uint8_t worker_idx);
+int crypto_l2_pqc_encrypt_plain(struct packet_crypto_ctx *ctx,
+                                uint8_t *packet, uint32_t *packet_len);
+int crypto_l2_pqc_decrypt_plain(struct packet_crypto_ctx *ctx,
+                                uint8_t *packet, uint32_t *packet_len);
+int crypto_l2_pqc_decrypt_tcp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len);
+int crypto_l2_pqc_encrypt_tcp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len);
+int crypto_l2_pqc_encrypt_arp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len);
+int crypto_l2_pqc_decrypt_arp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len);
+int crypto_l2_pqc_udp_need_split(uint32_t packet_len);
+int crypto_l2_pqc_udp_split(struct packet_crypto_ctx *ctx,
+                            uint8_t *packet, uint32_t packet_len,
+                            size_t first_max, uint32_t *first_len,
+                            uint8_t *second, size_t second_max,
+                            uint32_t *second_len);
+int crypto_l2_pqc_encrypt_udp(struct packet_crypto_ctx *ctx,
+                              uint8_t *packet, uint32_t *packet_len);
+int crypto_l2_pqc_udp_is_fragment(const struct app_config *cfg,
+                                  const uint8_t *packet, uint32_t packet_len,
+                                  uint16_t *packet_id, uint8_t *fragment_index);
+int crypto_l2_pqc_udp_reassemble(int profile_slot, int worker_idx,
+                                 struct packet_crypto_ctx *ctx,
+                                 uint8_t *packet, uint32_t *packet_len,
+                                 uint8_t *out, uint32_t *out_len);
+void crypto_l2_pqc_udp_gc(int profile_slot, int worker_idx, uint64_t now_ns);
+int crypto_l2_pqc_icmp_need_split(uint32_t packet_len);
+int crypto_l2_pqc_icmp_split(struct packet_crypto_ctx *ctx,
+                             uint8_t *packet, uint32_t packet_len,
+                             size_t first_max, uint32_t *first_len,
+                             uint8_t *second, size_t second_max,
+                             uint32_t *second_len);
+int crypto_l2_pqc_icmp_is_fragment(const struct app_config *cfg,
+                                   const uint8_t *packet, uint32_t packet_len,
+                                   uint16_t *packet_id, uint8_t *fragment_index);
+int crypto_l2_pqc_icmp_reassemble(int profile_slot, int worker_idx,
+                                  struct packet_crypto_ctx *ctx,
+                                  uint8_t *packet, uint32_t *packet_len,
+                                  uint8_t *out, uint32_t *out_len);
+void crypto_l2_pqc_icmp_gc(int profile_slot, int worker_idx, uint64_t now_ns);
+
 #endif

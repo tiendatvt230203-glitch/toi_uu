@@ -11,8 +11,6 @@ KERNEL_HEADERS = /usr/include
 LIB_DIR = lib
 TARGET  = network-encryptor
 
-OPT_SRCS = $(wildcard src/crypto/options/common/*.c)
-
 PQC_SRCS = $(wildcard src/crypto/pqc/*.c)
 
 CORE_SRCS = $(wildcard src/core/forwarder/*.c) \
@@ -26,7 +24,6 @@ CRYPTO_COMMON_SRCS = $(wildcard src/crypto/common/*.c)
 APP_SRC = main.c \
           $(CORE_SRCS) \
           $(CRYPTO_COMMON_SRCS) \
-          $(OPT_SRCS) \
           $(PQC_SRCS)
 APP_OBJ = $(APP_SRC:.c=.o)
 
@@ -56,5 +53,4 @@ $(LIB_DIR)/%.o: bpf/%.c
 
 clean:
 	rm -rf network-encryptor src/*.o src/core/*/*.o src/crypto/common/*.o \
-		src/crypto/options/*.o src/crypto/options/common/*.o \
 		src/crypto/pqc/*.o src/db/*.o *.o $(BPF_OBJ)

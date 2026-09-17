@@ -91,17 +91,24 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
     uint8_t *tail_buf = NULL;
     uint32_t len = job->len;
     uint32_t l1 = 0, l2 = 0;
-    crypto_option_id opt_id = CRYPTO_OPT_L2_PQC;
+    int need_split = pclass == CRYPTO_PROTO_UDP
+        ? crypto_l2_pqc_udp_need_split(len)
+        : pclass == CRYPTO_PROTO_ICMP
+            ? crypto_l2_pqc_icmp_need_split(len) : 0;
 
     (void)flow_ok;
     (void)cp;
 
-    if (crypto_option_need_split(opt_id, pclass, len)) {
+    if (need_split) {
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
             return -1;
         tail_buf = ne_packet_data(&fwd->pair, tail.addr);
-        if (crypto_option_split(opt_id, pclass, pctx, pkt, len, fwd->pair.frame_size, &l1,
-                                tail_buf, fwd->pair.frame_size, &l2) != 0) {
+        int split_rc = pclass == CRYPTO_PROTO_UDP
+            ? crypto_l2_pqc_udp_split(pctx, pkt, len, fwd->pair.frame_size,
+                                      &l1, tail_buf, fwd->pair.frame_size, &l2)
+            : crypto_l2_pqc_icmp_split(pctx, pkt, len, fwd->pair.frame_size,
+                                       &l1, tail_buf, fwd->pair.frame_size, &l2);
+        if (split_rc != 0) {
             ne_frame_free(&fwd->pair, tail.addr);
             return -1;
         }
@@ -110,7 +117,16 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
         return 1;
     }
 
-    if (crypto_option_encrypt(opt_id, pclass, pctx, pkt, &len) != 0) {
+    int encrypt_rc;
+    if (pclass == CRYPTO_PROTO_TCP)
+        encrypt_rc = crypto_l2_pqc_encrypt_tcp(pctx, pkt, &len);
+    else if (pclass == CRYPTO_PROTO_UDP)
+        encrypt_rc = crypto_l2_pqc_encrypt_udp(pctx, pkt, &len);
+    else if (pclass == CRYPTO_PROTO_ARP)
+        encrypt_rc = crypto_l2_pqc_encrypt_arp(pctx, pkt, &len);
+    else
+        encrypt_rc = crypto_l2_pqc_encrypt_plain(pctx, pkt, &len);
+    if (encrypt_rc != 0) {
         return -1;
     }
     job->len = len;
@@ -250,8 +266,16 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         if (enc == 0)
             job.len = len;
     } else {
-        enc = encrypt_to_wan(fwd, &job, cp, wan_dp, pctx,
-                             crypto_proto_classify(proto), flow_ok);
+        crypto_proto_class pclass = CRYPTO_PROTO_OTHER;
+
+        if (proto == IPPROTO_UDP)
+            pclass = CRYPTO_PROTO_UDP;
+        else if (proto == IPPROTO_ICMP)
+            pclass = CRYPTO_PROTO_ICMP;
+        else if (proto == 89)
+            pclass = CRYPTO_PROTO_OSPF;
+        enc = encrypt_to_wan(fwd, &job, cp, wan_dp, pctx, pclass,
+                             flow_ok);
     }
     if (enc < 0)
         goto drop;

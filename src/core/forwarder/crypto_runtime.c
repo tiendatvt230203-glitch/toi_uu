@@ -540,7 +540,8 @@ void fwd_crypto_frag_gc_worker_tick(int worker_idx)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 
-    crypto_option_frag_gc_all(0, worker_idx, now_ns);
+    crypto_l2_pqc_udp_gc(0, worker_idx, now_ns);
+    crypto_l2_pqc_icmp_gc(0, worker_idx, now_ns);
 }
 
 int fwd_crypto_policy_ready(int policy_index)

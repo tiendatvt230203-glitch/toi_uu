@@ -476,8 +476,7 @@ static int arp_try_encrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
     memcpy(scratch, pkt, orig_len);
     len = orig_len;
 
-    if (crypto_option_encrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ARP,
-                              &ctx, pkt, &len) != 0) {
+    if (crypto_l2_pqc_encrypt_arp(&ctx, pkt, &len) != 0) {
         memcpy(pkt, scratch, orig_len);
         job->len = orig_len;
         return 0;
@@ -513,8 +512,7 @@ static int arp_try_decrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
         return -1;
     memcpy(encrypted, pkt, wire_len);
     len = job->len;
-    if (crypto_option_decrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ARP,
-                              &ctx, pkt, &len) != 0) {
+    if (crypto_l2_pqc_decrypt_arp(&ctx, pkt, &len) != 0) {
         /* During activation/rekey, accept a peer still using the configured
          * static fallback. Encryption always prefers dynamic CURRENT. */
         if (using_static ||
@@ -522,8 +520,7 @@ static int arp_try_decrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
             return -1;
         memcpy(pkt, encrypted, wire_len);
         len = wire_len;
-        if (crypto_option_decrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ARP,
-                                  &static_ctx, pkt, &len) != 0)
+        if (crypto_l2_pqc_decrypt_arp(&static_ctx, pkt, &len) != 0)
             return -1;
     }
     if (!arp_bridge_is_packet(pkt, len))

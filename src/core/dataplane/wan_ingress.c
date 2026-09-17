@@ -110,7 +110,7 @@ static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
     if (!ctx)
         return -1;
 
-    if (crypto_option_decrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_TCP, ctx, pkt, len) == 0 &&
+    if (crypto_l2_pqc_decrypt_tcp(ctx, pkt, len) == 0 &&
         wan_l2_plain_ipv4(pkt, *len))
         return 0;
     return -1;
@@ -131,8 +131,8 @@ static int reassemble_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
     if (slot < 0)
         return -1;
     crypto_l2_pqc_reasm_set_addr(addr);
-    rr = crypto_option_reassemble(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP, slot, dp_crypto_current_worker_idx(),
-                                  ctx, pkt, len, pkt, &blen);
+    rr = crypto_l2_pqc_udp_reassemble(slot, dp_crypto_current_worker_idx(),
+                                      ctx, pkt, len, pkt, &blen);
     if (rr == 0) {
         *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
         return 0;
@@ -216,16 +216,16 @@ static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
             uint32_t orig_len = len;
             uint8_t wire_pol = 0;
             int need_backup = wan_l2_is_udp_tagged(pkt, len) ||
-                crypto_option_is_fragment(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
-                                          fwd->cfg, pkt, len, &pid, &fidx);
+                crypto_l2_pqc_udp_is_fragment(fwd->cfg, pkt, len,
+                                              &pid, &fidx);
             if (need_backup && orig_len <= sizeof(scratch))
                 memcpy(scratch, pkt, orig_len);
             if (decrypt_l2(fwd, pkt, &len) != 0 || !wan_l2_plain_ok(pkt, len)) {
                 if (need_backup)
                     memcpy(pkt, scratch, orig_len);
                 len = orig_len;
-                if (crypto_option_is_fragment(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
-                                              fwd->cfg, pkt, len, &pid, &fidx)) {
+                if (crypto_l2_pqc_udp_is_fragment(fwd->cfg, pkt, len,
+                                                  &pid, &fidx)) {
                     if (crypto_l2_pqc_read_policy_id(pkt, len, &wire_pol) != 0)
                         return -1;
                     if (reassemble_l2(fwd, pkt, &len, wire_pol, job->addr, &pending) != 0)
@@ -578,9 +578,9 @@ static int wan_reassemble_l2_icmp(struct forwarder *fwd, uint8_t *pkt,
         return -1;
 
     crypto_l2_pqc_reasm_set_addr(addr);
-    result = crypto_option_reassemble(
-        CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ICMP, profile_slot,
-        dp_crypto_current_worker_idx(), ctx, pkt, len, pkt, &joined_len);
+    result = crypto_l2_pqc_icmp_reassemble(
+        profile_slot, dp_crypto_current_worker_idx(), ctx, pkt, len,
+        pkt, &joined_len);
     if (result == 0) {
         *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
         return 0;
