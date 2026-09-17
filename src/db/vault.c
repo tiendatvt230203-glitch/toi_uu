@@ -1,5 +1,5 @@
-#include "../../inc/db/vault.h"
-#include "../../inc/db/db_env.h"
+#include "vault.h"
+#include "db_env.h"
 
 #include <arpa/inet.h>
 #include <errno.h>

@@ -1,4 +1,4 @@
-#include "../../inc/core/util/config.h"
+#include "core/core_types.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>

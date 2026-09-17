@@ -1,9 +1,9 @@
 CC     = gcc
 CLANG  = clang
 
-CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Iinc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
+CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Isrc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
-          ./lib/libxdp.so.1 ./lib/libpq.so.5.14 ./lib/libscrypt.so
+          ./lib/libxdp.so.1 -lpq ./lib/libscrypt.so
 
 BPF_CFLAGS     = -O2 -target bpf -g
 KERNEL_HEADERS = /usr/include
@@ -13,11 +13,12 @@ TARGET  = network-encryptor
 
 PQC_SRCS = $(wildcard src/crypto/pqc/*.c)
 
-CORE_SRCS = $(wildcard src/core/forwarder/*.c) \
+CORE_SRCS = $(wildcard src/core/runtime/*.c) \
+            $(wildcard src/core/profile/*.c) \
+            $(wildcard src/core/interface/*.c) \
             $(wildcard src/core/dataplane/*.c) \
-            $(wildcard src/core/iface/*.c) \
-            $(wildcard src/core/failover/*.c) \
-            $(wildcard src/core/util/*.c)
+            $(wildcard src/core/crypto/*.c) \
+            $(wildcard src/core/wan/*.c)
 
 CRYPTO_COMMON_SRCS = $(wildcard src/crypto/common/*.c)
 

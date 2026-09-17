@@ -1,8 +1,8 @@
-#include "../../inc/db/db_runtime.h"
+#include "db_runtime.h"
 #include "../../inc/crypto/pqc_handshake.h"
 
-#include "../../inc/db/db_config.h"
-#include "../../inc/db/db_env.h"
+#include "db_config.h"
+#include "db_env.h"
 
 #include <libpq-fe.h>
 #include <stdio.h>
@@ -41,10 +41,9 @@ int load_active_profile_config(struct app_config *out_cfg, int profile_id)
     if (!out_cfg || profile_id <= 0)
         return -1;
 
-    sig_pqc_prepare_reload();
     if (config_load_from_db(out_cfg, profile_id, NULL) != 0)
         return -1;
-    (void)sig_pqc_arp_reconcile_profile(profile_id);
-    sig_pqc_finalize_reload();
+    /* ARP uses the built-in static key; it never participates in PQC
+     * handshake or key rotation. */
     return 0;
 }

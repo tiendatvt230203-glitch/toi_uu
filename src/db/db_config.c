@@ -1,6 +1,5 @@
-#include "../../inc/db/db_config.h"
-#include "../../inc/crypto/crypto_option.h"
-#include "../../inc/db/db_env.h"
+#include "db_config.h"
+#include "db_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +8,96 @@
 #include <libpq-fe.h>
 #include <strings.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include "../../inc/crypto/pqc_handshake.h"
+#include "../crypto/pqc/include/pqc_vault.h"
+
+static int db_load_local_pqc_identity(const char *fingerprint,
+                                      char *private_key, size_t private_size,
+                                      char *public_key, size_t public_size)
+{
+    char clean[16] = "";
+    char filename[64];
+    int private_rc;
+    int public_rc;
+
+    if (!fingerprint || !fingerprint[0])
+        return -1;
+    snprintf(clean, sizeof(clean), "%.8s", fingerprint);
+    snprintf(filename, sizeof(filename), "%s.key", clean);
+    private_rc = sig_pqc_vault_read_key(VAULT_PATH_LOCAL_PRIVATE, filename,
+                                         private_key, private_size);
+    if (private_rc != 0)
+        private_rc = sig_pqc_vault_read_key(VAULT_PATH_LOCAL_PRIVATE, clean,
+                                             private_key, private_size);
+    public_rc = sig_pqc_vault_read_key(VAULT_PATH_LOCAL_PUBLIC, filename,
+                                        public_key, public_size);
+    if (public_rc != 0)
+        public_rc = sig_pqc_vault_read_key(VAULT_PATH_LOCAL_PUBLIC, clean,
+                                            public_key, public_size);
+    return private_rc == 0 && public_rc == 0 ? 0 : -1;
+}
+
+int db_config_load_pqc_policy(void *pg_conn, int policy_id, int profile_id,
+                              struct pqc_policy_input *out)
+{
+    PGconn *conn = pg_conn;
+    struct pqc_policy_input in = {0};
+    char id[32];
+    const char *params[1];
+    PGresult *tunnel;
+    PGresult *keys;
+    int rc = -1;
+
+    if (!conn || !out || policy_id <= 0 || profile_id <= 0)
+        return -1;
+    snprintf(id, sizeof(id), "%d", policy_id);
+    params[0] = id;
+    in.policy_id = policy_id;
+    in.profile_id = profile_id;
+    in.role_mode = PQC_USE_DYNAMIC_ROLE ? PQC_ROLE_DYNAMIC : PQC_ROLE_RESPONDER;
+
+    tunnel = PQexecParams(conn,
+        "SELECT t.tunnel_name, t.tunnel_ip::text, t.peer_tunnel_ip::text "
+        "FROM pqc_exchange_tunnels t JOIN profile_tunnel_ref r ON t.id=r.tunnel_id "
+        "JOIN ne_policies p ON r.profile_id=p.profile_id WHERE p.id=$1",
+        1, NULL, params, NULL, NULL, 0);
+    if (PQresultStatus(tunnel) != PGRES_TUPLES_OK || PQntuples(tunnel) != 1)
+        goto out_tunnel;
+    snprintf(in.wan_ifname, sizeof(in.wan_ifname), "%s", PQgetvalue(tunnel, 0, 0));
+    snprintf(in.peer_ip, sizeof(in.peer_ip), "%s", PQgetvalue(tunnel, 0, 2));
+    in.is_tunnel = true;
+    PQclear(tunnel);
+
+    keys = PQexecParams(conn,
+        "SELECT k.local, k.remote, k.key_id FROM pqc_keys k "
+        "JOIN policy_pqc_ref r ON k.key_id=r.key_id WHERE r.policy_id=$1",
+        1, NULL, params, NULL, NULL, 0);
+    if (PQresultStatus(keys) != PGRES_TUPLES_OK || PQntuples(keys) != 1)
+        goto out_keys;
+    snprintf(in.local_fingerprint, sizeof(in.local_fingerprint), "%s", PQgetvalue(keys, 0, 0));
+    snprintf(in.peer_fingerprint, sizeof(in.peer_fingerprint), "%.8s", PQgetvalue(keys, 0, 1));
+    snprintf(in.key_id, sizeof(in.key_id), "%s", PQgetvalue(keys, 0, 2));
+    if (sig_pqc_vault_read_key(VAULT_PATH_REMOTE_PUBLIC, PQgetvalue(keys, 0, 1),
+                               in.peer_public_key, sizeof(in.peer_public_key)) != 0)
+        goto out_keys;
+    if (db_load_local_pqc_identity(in.local_fingerprint,
+                                   in.local_private_key,
+                                   sizeof(in.local_private_key),
+                                   in.local_public_key,
+                                   sizeof(in.local_public_key)) != 0)
+        goto out_keys;
+    *out = in;
+    rc = 0;
+out_keys:
+    PQclear(keys);
+    return rc;
+out_tunnel:
+    PQclear(tunnel);
+    return -1;
+}
 
 static int str_is_any(const char *v) {
     if (!v) return 1;
@@ -360,7 +448,6 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
     char id_str[32];
     snprintf(id_str, sizeof(id_str), "%d", profile_id);
     const char *params[1] = { id_str };
-    sig_pqc_prepare_reload();
     PGresult *res = PQexecParams(conn,
         "SELECT id, name, 1 AS enabled FROM ne_profiles WHERE id = $1",
         1, NULL, params, NULL, NULL, 0);
@@ -444,7 +531,8 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         } else {
             /* Every encrypt policy is L2 PQC. */
             cp_base.action = POLICY_ACTION_ENCRYPT_L2;
-            sig_pqc_load_and_bind_policy(conn, db_policy_id, cfg->profile_id);
+            /* NE will request and own this policy input before it calls PQC.
+             * The loader no longer starts a handshake as a side effect. */
             int wire_id = alloc_wire_policy_id(db_policy_id, wire_id_used);
             if (wire_id < 0) {
                 fprintf(stderr, "[DB CRYPTO] no free wire policy id for encrypt policy %d\n",
@@ -532,7 +620,6 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
                 "IPv4 data path will fail-close until policy is added\n",
                 cfg->profile_id, cfg->profile_name);
     }
-    sig_pqc_finalize_reload();
     return 0;
 }
 

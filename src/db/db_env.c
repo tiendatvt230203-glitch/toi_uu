@@ -1,5 +1,5 @@
-#include "../../inc/db/db_env.h"
-#include "../../inc/db/vault.h"
+#include "db_env.h"
+#include "vault.h"
 
 #include <stdlib.h>
 #include <string.h>

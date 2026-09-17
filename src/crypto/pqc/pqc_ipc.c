@@ -13,7 +13,6 @@
 #include "pqc_handshake.h"
 #include "traffic_crypto.h"
 #include "pqc_vault.h"
-#include "core/forwarder/forwarder_crypto_runtime.h"
 
 #define IPC_SOCKET_PATH "/var/run/test_network-encryptor.sock"
 
@@ -80,7 +79,8 @@ static void *ipc_listener_thread_main(void *arg) {
             if (sscanf(buf, "RETRY %d", &policy_id) == 1) {
                 char resp_buf[1024];
                 memset(resp_buf, 0, sizeof(resp_buf));
-                sig_pqc_trigger_retry_with_info(policy_id, resp_buf, sizeof(resp_buf) - 1);
+                snprintf(resp_buf, sizeof(resp_buf),
+                         "Policy %d retry is not implemented\n", policy_id);
                 if (write(client_fd, resp_buf, strlen(resp_buf)) < 0) {
                     perror("write");
                 }
@@ -88,11 +88,9 @@ static void *ipc_listener_thread_main(void *arg) {
                 char resp_buf[256];
 
                 memset(resp_buf, 0, sizeof(resp_buf));
-                if (fwd_crypto_format_pqc_key_times(resp_buf,
-                                                    sizeof(resp_buf) - 1,
-                                                    policy_id) != 0)
-                    snprintf(resp_buf, sizeof(resp_buf),
-                             "ERROR: cannot read PQC key times\n");
+                snprintf(resp_buf, sizeof(resp_buf),
+                         "Policy %d key lifetime is not implemented\n",
+                         policy_id);
                 if (write(client_fd, resp_buf, strlen(resp_buf)) < 0)
                     perror("write");
             } else {
