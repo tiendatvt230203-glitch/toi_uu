@@ -552,13 +552,25 @@ static int handle_profile_notify(struct runtime_state *rt,
     }
 }
 
-int main(int argc, char **argv) {
-    g_prog_name = argv[0] ? argv[0] : "network-encryptor";
+struct daemon_context {
+    struct ne_postgres_conn pg;
+    PGconn *db;
+    struct runtime_state *runtime;
+    int active_profile_id;
+    int core_ready;
+};
 
-    int ipc_rc = sig_pqc_handle_ipc_cli(argc, argv);
-    if (ipc_rc >= 0) {
+#define NE_START_DAEMON (-2)
+
+static int handle_cli_command(int argc, char **argv)
+{
+    int profile_id = -1;
+    int ipc_rc;
+
+    g_prog_name = argv[0] ? argv[0] : "network-encryptor";
+    ipc_rc = sig_pqc_handle_ipc_cli(argc, argv);
+    if (ipc_rc >= 0)
         return ipc_rc;
-    }
 
     if (argc > 1 && strcmp(argv[1], "-gi") == 0) {
         sig_pqc_handle_gen_identity();
@@ -593,12 +605,6 @@ int main(int argc, char **argv) {
         return notify_wan_admin("ai", argv[2]) != 0 ? 1 : 0;
     }
 
-    setbuf(stderr, NULL);
-    if (trf_pqc_init_global() != TRF_PQC_OK) {
-        fprintf(stderr, "[FATAL] trf_pqc_init_global failed\n");
-        return 1;
-    }
-
     if (argc == 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         usage(argv[0]);
         return 0;
@@ -608,7 +614,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    int profile_id = -1;
     if (parse_startup_profile_id(argc, argv, &profile_id) != 0) {
         usage(argv[0]);
         return 1;
@@ -634,96 +639,108 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    {
-        struct sigaction sa = { .sa_handler = on_stop_signal };
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGINT, &sa, NULL);
-        sigaction(SIGTERM, &sa, NULL);
-    }
+    return NE_START_DAEMON;
+}
 
+static int daemon_connect_vault_db(struct daemon_context *ctx)
+{
     if (load_ne_env() != 0) {
         fprintf(stderr,
                 "[FATAL] Vault/DB bootstrap failed "
                 "(check " NE_ENV_FILE " VAULT_* / UNSEAL_KEY_* and Vault "
                 NE_VAULT_SECRET_PATH ")\n");
-        return 1;
+        return -1;
     }
-
-    struct ne_postgres_conn pg;
-    if (ne_postgres_conn_fill(&pg) != 0) {
+    if (ne_postgres_conn_fill(&ctx->pg) != 0) {
         fprintf(stderr,
                 "[FATAL] Vault " NE_VAULT_SECRET_PATH
                 " empty or incomplete — need POSTGRES_SERVER/PORT/USER/DB/PASSWORD\n");
-        return 1;
+        return -1;
     }
+
+    fprintf(stderr, "[DB] Vault host=%s port=%s dbname=%s user=%s\n",
+            ctx->pg.values[0], ctx->pg.values[1],
+            ctx->pg.values[2], ctx->pg.values[3]);
+
+    ctx->db = PQconnectdbParams(ctx->pg.keywords, ctx->pg.values, 0);
+    if (PQstatus(ctx->db) != CONNECTION_OK) {
+        fprintf(stderr, "[FATAL] DB connection failed: %s", PQerrorMessage(ctx->db));
+        return -1;
+    }
+    PQclear(PQexec(ctx->db, "LISTEN " NOTIFY_CHANNEL));
+    PQclear(PQexec(ctx->db, "LISTEN " WAN_ADMIN_CHANNEL));
+    return 0;
+}
+
+static int daemon_setup_core_once(struct daemon_context *ctx)
+{
+    struct sigaction sa = { .sa_handler = on_stop_signal };
+
+    if (trf_pqc_init_global() != TRF_PQC_OK) {
+        fprintf(stderr, "[FATAL] trf_pqc_init_global failed\n");
+        return -1;
+    }
+    ctx->core_ready = 1;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     sig_pqc_start_ipc_server();
     cfm_status_ipc_start();
     sig_pqc_init_vault();
     libbpf_set_print(libbpf_print_silent);
-
     forwarder_pin_cpu();
-    PGconn *listen_conn = PQconnectdbParams(pg.keywords, pg.values, 0);
-    if (PQstatus(listen_conn) != CONNECTION_OK) {
-        fprintf(stderr, "[FATAL] DB connection failed: %s", PQerrorMessage(listen_conn));
-        fprintf(stderr,
-                "[DB] tried host=%s port=%s dbname=%s user=%s (from Vault "
-                NE_VAULT_SECRET_PATH ")\n",
-                pg.values[0], pg.values[1], pg.values[2], pg.values[3]);
-        PQfinish(listen_conn);
-        return 1;
-    }
-    PQclear(PQexec(listen_conn, "LISTEN " NOTIFY_CHANNEL));
-    PQclear(PQexec(listen_conn, "LISTEN " WAN_ADMIN_CHANNEL));
 
-    daemon_idle_log();
-
-    struct runtime_state *rt = calloc(1, sizeof(*rt));
-    if (!rt) {
+    ctx->runtime = calloc(1, sizeof(*ctx->runtime));
+    if (!ctx->runtime) {
         fprintf(stderr, "[FATAL] out of memory for runtime state\n");
-        PQfinish(listen_conn);
-        return 1;
+        return -1;
     }
+    daemon_idle_log();
+    return 0;
+}
 
-    int active_profile_id = 0;
+static void daemon_restore_db_listen(struct daemon_context *ctx)
+{
+    PQreset(ctx->db);
+    if (PQstatus(ctx->db) != CONNECTION_OK)
+        return;
+    PQclear(PQexec(ctx->db, "LISTEN " NOTIFY_CHANNEL));
+    PQclear(PQexec(ctx->db, "LISTEN " WAN_ADMIN_CHANNEL));
+}
 
+static int daemon_run_profile_events(struct daemon_context *ctx)
+{
     while (!g_stop_requested) {
-        int pq_fd = PQsocket(listen_conn);
+        int pq_fd = PQsocket(ctx->db);
+        fd_set rfds;
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        int sr;
+
         if (pq_fd < 0) {
-            PQreset(listen_conn);
-            PQclear(PQexec(listen_conn, "LISTEN " NOTIFY_CHANNEL));
-            PQclear(PQexec(listen_conn, "LISTEN " WAN_ADMIN_CHANNEL));
+            daemon_restore_db_listen(ctx);
             usleep(200000);
             continue;
         }
 
-        fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(pq_fd, &rfds);
-
-        struct timeval tv = { .tv_sec = g_stop_requested ? 0 : 1,
-                              .tv_usec = g_stop_requested ? 200000 : 0 };
-        int sr = select(pq_fd + 1, &rfds, NULL, NULL, &tv);
+        sr = select(pq_fd + 1, &rfds, NULL, NULL, &tv);
         if (sr < 0) {
-            if (errno == EINTR) {
-                if (g_stop_requested)
-                    break;
+            if (errno == EINTR)
                 continue;
-            }
             usleep(200000);
             continue;
         }
-        if (sr == 0)
+        if (sr == 0 || !FD_ISSET(pq_fd, &rfds))
             continue;
 
-        if (!FD_ISSET(pq_fd, &rfds))
-            continue;
-
-        PQconsumeInput(listen_conn);
+        PQconsumeInput(ctx->db);
         PGnotify *notify;
-        while ((notify = PQnotifies(listen_conn)) != NULL) {
-            if (notify->relname && strcmp(notify->relname, WAN_ADMIN_CHANNEL) == 0) {
-                (void)handle_wan_admin_notify(rt, notify->extra);
+        while ((notify = PQnotifies(ctx->db)) != NULL) {
+            if (notify->relname &&
+                strcmp(notify->relname, WAN_ADMIN_CHANNEL) == 0) {
+                (void)handle_wan_admin_notify(ctx->runtime, notify->extra);
             } else {
                 int id = -1;
                 if (parse_notify_profile_cmd(notify->extra, &id) != 0) {
@@ -732,25 +749,52 @@ int main(int argc, char **argv) {
                             notify->extra ? notify->extra : "");
                 } else {
                     fprintf(stderr, "\n[NOTIFY] profile %d\n", id);
-                    fflush(stderr);
-                    (void)handle_profile_notify(rt, &active_profile_id, id);
+                    (void)handle_profile_notify(ctx->runtime,
+                                                &ctx->active_profile_id, id);
                 }
             }
             PQfreemem(notify);
         }
 
-        if (PQstatus(listen_conn) != CONNECTION_OK) {
-            PQreset(listen_conn);
-            PQclear(PQexec(listen_conn, "LISTEN " NOTIFY_CHANNEL));
-            PQclear(PQexec(listen_conn, "LISTEN " WAN_ADMIN_CHANNEL));
-        }
+        if (PQstatus(ctx->db) != CONNECTION_OK)
+            daemon_restore_db_listen(ctx);
+    }
+    return 0;
+}
+
+static void daemon_cleanup(struct daemon_context *ctx)
+{
+    if (ctx->runtime) {
+        if (ctx->runtime->has_thread)
+            runtime_stop_forwarder(ctx->runtime);
+        free(ctx->runtime);
+    }
+    if (ctx->db)
+        PQfinish(ctx->db);
+    if (ctx->core_ready)
+        trf_pqc_cleanup();
+}
+
+int main(int argc, char **argv)
+{
+    struct daemon_context daemon = {0};
+    int rc;
+
+    setbuf(stderr, NULL);
+    rc = handle_cli_command(argc, argv);
+    if (rc != NE_START_DAEMON)
+        return rc;
+
+    if (daemon_connect_vault_db(&daemon) != 0) {
+        daemon_cleanup(&daemon);
+        return 1;
+    }
+    if (daemon_setup_core_once(&daemon) != 0) {
+        daemon_cleanup(&daemon);
+        return 1;
     }
 
-    if (rt->has_thread) {
-        runtime_stop_forwarder(rt);
-    }
-    free(rt);
-    PQfinish(listen_conn);
-    trf_pqc_cleanup();
-    return 0;
+    rc = daemon_run_profile_events(&daemon);
+    daemon_cleanup(&daemon);
+    return rc;
 }
