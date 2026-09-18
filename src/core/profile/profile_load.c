@@ -1,8 +1,6 @@
 #include "../../../inc/core/profile/profile_load.h"
 
-int core_profile_load(int profile_id, struct app_config *out)
+int core_profile_load()
 {
-    (void)profile_id;
-    (void)out;
-    return 0;
+
 }

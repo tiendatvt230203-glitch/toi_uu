@@ -13,14 +13,6 @@ struct {
     __type(value, int);
 } wan_xsks_map SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 2);
-    __type(key, int);
-    __type(value, __u16);
-} wan_config_map SEC(".maps");
-
-
 SEC("xdp")
 int xdp_wan_redirect_prog(struct xdp_md *ctx)
 {
@@ -45,7 +37,10 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         goto redirect;
     }
 
-    if (proto == __constant_htons(ETH_P_NE_UDP_ENC)) {
+    if (proto == __constant_htons(NE_L2_TCP_ETHERTYPE) ||
+        proto == __constant_htons(NE_L2_UDP_ETHERTYPE) ||
+        proto == __constant_htons(NE_L2_PING_ETHERTYPE) ||
+        proto == __constant_htons(NE_L2_OSPF_ETHERTYPE)) {
         goto redirect;
     }
 
@@ -61,16 +56,6 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
         return XDP_PASS;
     }
-
-    int key0 = 0;
-    __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
-    if (fake4 && *fake4 != 0 && proto == bpf_htons(*fake4))
-        goto redirect;
-
-    int key1 = 1;
-    __u16 *fake_udp = bpf_map_lookup_elem(&wan_config_map, &key1);
-    if (fake_udp && *fake_udp != 0 && proto == bpf_htons(*fake_udp))
-        goto redirect;
 
     return XDP_PASS;
 

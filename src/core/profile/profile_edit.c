@@ -1,40 +1,26 @@
 #include "../../../inc/core/profile/profile_edit.h"
 
-int core_profile_edit_apply(struct core_runtime *runtime,
-                            const struct app_config *config)
+int core_profile_edit_apply()
 {
-    (void)runtime;
-    (void)config;
-    return 0;
+
 }
 
-int core_profile_edit_lan(struct core_runtime *runtime,
-                          const struct app_config *config)
+int core_profile_edit_lan()
 {
-    (void)runtime;
-    (void)config;
-    return 0;
+
 }
 
-int core_profile_edit_wan(struct core_runtime *runtime,
-                          const struct app_config *config)
+int core_profile_edit_wan()
 {
-    (void)runtime;
-    (void)config;
-    return 0;
+
 }
 
-int core_profile_edit_policy(struct core_runtime *runtime,
-                             const struct app_config *config)
+int core_profile_edit_policy() 
 {
-    (void)runtime;
-    (void)config;
-    return 0;
+
 }
 
-int core_profile_edit_key(struct core_runtime *runtime, int policy_id)
+int core_profile_edit_key()
 {
-    (void)runtime;
-    (void)policy_id;
-    return 0;
+
 }

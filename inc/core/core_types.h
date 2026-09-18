@@ -4,13 +4,16 @@
 #define MAX_INTERFACES 16
 #define MAX_QUEUES 64
 #define MAX_CRYPTO_POLICIES 128
-#define MAX_BRIDGES_PER_PROFILE MAX_INTERFACES
+#define MAX_BRIDGES_PER_PROFILE 16
 #define PQC_PEER_PUB_MAX 8192
 #define MAC_LEN 6
 #define NE_PROFILE_SLOTS 1
 #define POLICY_PROTO_ANY 0
 #define POLICY_PROTO_TCP_UDP 254
-#define NE_L2_FAKE_ETHERTYPE 0x104Au
+#define NE_L2_TCP_ETHERTYPE  0x1054u
+#define NE_L2_UDP_ETHERTYPE  0x1055u
+#define NE_L2_PING_ETHERTYPE 0x1056u
+#define NE_L2_OSPF_ETHERTYPE 0x1059u
 #define CORE_MAX_WORKERS 64
 #define CORE_CRYPTO_WORKERS 6
 #define CORE_TX_WORKERS 4
@@ -26,7 +29,6 @@
 #define IPPROTO_UDP_VAL 17
 #define IPPROTO_OSPF_VAL 89
 #define ETH_P_NE_ARP_ENC 0x1048
-#define ETH_P_NE_UDP_ENC 0x104B
 #define ETH_P_CFM 0x8902
 #define ETH_P_ARP_VAL 0x0806
 #define ETH_P_8021Q_VAL 0x8100
@@ -142,7 +144,6 @@ struct app_config {
     char bpf_lan_file[256];
     char bpf_wan_file[256];
     int crypto_enabled;
-    uint16_t fake_ethertype_ipv4;
     struct crypto_policy policies[MAX_CRYPTO_POLICIES];
     int policy_count;
 };
@@ -150,6 +151,7 @@ struct app_config {
 struct ne_packet {
     uint64_t addr;
     uint32_t len;
+    uint16_t wire_ethertype;
     uint8_t dir;
     uint8_t wan_idx;
     uint8_t local_idx;

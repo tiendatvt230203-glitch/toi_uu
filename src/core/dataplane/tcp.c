@@ -1,52 +1,45 @@
 #include "../../../inc/core/dataplane/tcp.h"
 #include "../../../inc/core/crypto/crypto.h"
 
-int core_tcp_handle(struct core_runtime *runtime, void *packet,
-                    uint32_t *packet_length)
+int core_tcp_handle_lan_wan()
 {
-    (void)runtime;
-    (void)packet;
-    (void)packet_length;
-    return 0;
+    core_tcp_clamp_mss();
+    core_tcp_encrypt();
+    core_tcp_per_flow();
+    core_tcp_per_packet();
+}
+int core_tcp_handle_wan_lan()
+{
+    core_tcp_decrypt();
+    core_tcp_retry();
 }
 
-int core_tcp_clamp_mss(struct core_runtime *runtime, void *packet,
-                       uint32_t *packet_length)
+int core_tcp_clamp_mss()
 {
-    (void)runtime;
-    (void)packet;
-    (void)packet_length;
-    return 0;
+    
 }
 
-int core_tcp_encrypt(struct core_runtime *runtime, int policy_id,
-                     void *packet, uint32_t *packet_length)
+int core_tcp_encrypt()
 {
-    (void)runtime;
-    return core_l2_pqc_encrypt(policy_id, packet, packet_length);
+    
 }
 
-int core_tcp_decrypt(struct core_runtime *runtime, int policy_id,
-                     void *packet, uint32_t *packet_length)
+int core_tcp_decrypt()
 {
-    (void)runtime;
-    return core_l2_pqc_decrypt(policy_id, packet, packet_length);
+    
 }
 
-int core_tcp_select_wan(struct core_runtime *runtime, const void *packet,
-                        uint32_t packet_length)
+int core_tcp_per_flow()
 {
-    (void)runtime;
-    (void)packet;
-    (void)packet_length;
-    return 0;
+    
 }
 
-int core_tcp_bond(struct core_runtime *runtime, void *packet,
-                  uint32_t *packet_length)
+int core_tcp_per_packet()
 {
-    (void)runtime;
-    (void)packet;
-    (void)packet_length;
-    return 0;
+    
+}
+
+int core_tcp_retry()
+{
+    
 }

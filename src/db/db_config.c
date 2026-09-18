@@ -125,22 +125,6 @@ static int parse_port_range(const char *v, int *from_out, int *to_out) {
     return -1;
 }
 
-static int parse_ipv4_addr(const char *v, uint32_t *out_ip) {
-    if (!v || !out_ip || v[0] == '\0')
-        return -1;
-    char buf[64];
-    strncpy(buf, v, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-    char *slash = strchr(buf, '/');
-    if (slash)
-        *slash = '\0';
-    struct in_addr a;
-    if (inet_pton(AF_INET, buf, &a) != 1)
-        return -1;
-    *out_ip = a.s_addr;
-    return 0;
-}
-
 static uint8_t parse_protocol_name(const char *v) {
     if (str_is_any(v)) return POLICY_PROTO_ANY;
     if (strcasecmp(v, "tcp/udp") == 0) return POLICY_PROTO_TCP_UDP;
@@ -753,7 +737,6 @@ static int db_load_wan_for_profile(PGconn *conn, struct app_config *cfg, int pro
 
 int config_apply_crypto_from_policies(struct app_config *cfg) {
     cfg->crypto_enabled = 0;
-    cfg->fake_ethertype_ipv4 = 0;
 
     if (cfg->policy_count <= 0) {
         if (cfg->enabled) {
@@ -775,8 +758,6 @@ int config_apply_crypto_from_policies(struct app_config *cfg) {
     }
 
     cfg->crypto_enabled = has_encrypt ? 1 : 0;
-    if (has_encrypt)
-        cfg->fake_ethertype_ipv4 = (uint16_t)NE_L2_FAKE_ETHERTYPE;
 
     return 0;
 }

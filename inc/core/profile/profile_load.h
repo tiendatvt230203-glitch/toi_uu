@@ -3,5 +3,5 @@
 
 #include "../core_types.h"
 
-int core_profile_load(int profile_id, struct app_config *out);
+int core_profile_load();
 #endif

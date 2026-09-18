@@ -1,28 +1,40 @@
 #include "../../../inc/core/dataplane/ping.h"
+#include "../../../inc/core/crypto/crypto.h"
 
-int core_ping_handle(struct core_runtime *runtime, void *packet,
-                     uint32_t *packet_length)
+int core_ping_handle_lan_wan()
 {
-    (void)runtime;
-    (void)packet;
-    (void)packet_length;
-    return 0;
+    core_ping_fragment();
+    core_ping_encrypt();
+    core_ping_per_flow();
 }
 
-int core_ping_fragment(struct core_runtime *runtime, void *packet,
-                       uint32_t packet_length)
+int core_ping_handle_wan_lan()
 {
-    (void)runtime;
-    (void)packet;
-    (void)packet_length;
-    return 0;
+    core_ping_reassemble();
+    core_ping_decrypt();
 }
 
-int core_ping_reassemble(struct core_runtime *runtime, void *packet,
-                         uint32_t *packet_length)
+int core_ping_fragment()
 {
-    (void)runtime;
-    (void)packet;
-    (void)packet_length;
-    return 0;
+    
+}
+
+int core_ping_reassemble()
+{
+   
+}
+
+int core_ping_encrypt()
+{
+    
+}
+
+int core_ping_decrypt()
+{
+    
+}
+
+int core_ping_per_flow()
+{
+    
 }

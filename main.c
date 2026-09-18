@@ -2,49 +2,43 @@
 
 static int handle_cli_command(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
-    return 0;
+
 }
 
 static int daemon_connect_vault(void)
 {
-    return 0;
+
 }
 
 static int daemon_load_db_account(void)
 {
-    return 0;
+
 }
 
 static int daemon_login_db(void)
 {
-    return 0;
+
 }
 
 static int daemon_load_profile_id(int *profile_id)
 {
-    (void)profile_id;
-    return 0;
+
 }
 
 static int daemon_setup_core_once(struct core_runtime *runtime,
                                   int profile_id)
 {
-    (void)runtime;
-    (void)profile_id;
-    return 0;
+
 }
 
 static int daemon_run(struct core_runtime *runtime)
 {
-    (void)runtime;
-    return 0;
+
 }
 
 static void daemon_cleanup(struct core_runtime *runtime)
 {
-    (void)runtime;
+
 }
 
 int main(int argc, char **argv)
