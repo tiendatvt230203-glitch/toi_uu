@@ -198,10 +198,6 @@ struct ne_pair {
     uint32_t xdp_flags;
 };
 
-struct core_interfaces {
-    struct ne_pair pair;
-};
-
 struct core_worker {
     pthread_t thread;
     enum core_worker_role role;
@@ -217,7 +213,7 @@ struct core_profile {
 
 struct core_runtime {
     struct core_profile profile;
-    struct core_interfaces interfaces;
+    struct ne_pair pair;
     struct ne_ring local_to_crypto[CORE_CRYPTO_WORKERS];
     struct ne_ring wan_to_crypto[CORE_CRYPTO_WORKERS];
     struct ne_ring crypto_to_lan[MAX_INTERFACES][CORE_CRYPTO_WORKERS];

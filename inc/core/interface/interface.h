@@ -3,9 +3,6 @@
 
 #include "../core_types.h"
 
-int core_interface_open(struct core_interfaces *, const struct app_config *);
-void core_interface_close(struct core_interfaces *);
-
 int ne_pair_local_live(const struct ne_pair *p, int pair_local_idx);
 int ne_pair_wan_live(const struct ne_pair *p, int dp_slot);
 int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg,

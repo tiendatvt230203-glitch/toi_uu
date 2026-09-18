@@ -4,20 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-int core_interface_open(struct core_interfaces *interfaces,
-                        const struct app_config *config)
-{
-    if (!interfaces)
-        return -EINVAL;
-    return ne_pair_open(&interfaces->pair, config);
-}
-
-void core_interface_close(struct core_interfaces *interfaces)
-{
-    if (interfaces)
-        ne_pair_close(&interfaces->pair, NULL);
-}
-
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop)
 {
     if (!r || cap == 0 || (cap & (cap - 1u)) != 0)
