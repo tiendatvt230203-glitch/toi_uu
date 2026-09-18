@@ -94,16 +94,38 @@ struct pqc_profile_config {
 
 struct local_config {
     char ifname[IF_NAMESIZE];
+    int ifindex;
+    int queue_count;
+    struct {
+        struct xsk_socket *xsk;
+        struct xsk_ring_cons rx;
+        struct xsk_ring_prod tx;
+        struct xsk_ring_prod fq;
+        struct xsk_ring_cons cq;
+        uint32_t rx_pending;
+    } queues[MAX_QUEUES];
+    uint64_t tx_no_free;
+    uint32_t xdp_flags;
 };
 
 struct wan_config {
-    int db_id;
     char ifname[IF_NAMESIZE];
-    uint32_t dst_ip;
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
     int dataplane;
     int bandwidth_weight;
+    int ifindex;
+    int queue_count;
+    struct {
+        struct xsk_socket *xsk;
+        struct xsk_ring_cons rx;
+        struct xsk_ring_prod tx;
+        struct xsk_ring_prod fq;
+        struct xsk_ring_cons cq;
+        uint32_t rx_pending;
+    } queues[MAX_QUEUES];
+    uint64_t tx_no_free;
+    uint32_t xdp_flags;
 };
 
 struct app_config {
@@ -154,24 +176,6 @@ struct ne_pool {
     pthread_spinlock_t lock;
 };
 
-struct ne_xsk_queue {
-    struct xsk_socket *xsk;
-    struct xsk_ring_cons rx;
-    struct xsk_ring_prod tx;
-    struct xsk_ring_prod fq;
-    struct xsk_ring_cons cq;
-    uint32_t rx_pending;
-};
-
-struct ne_iface {
-    int ifindex;
-    char ifname[IF_NAMESIZE];
-    int queue_count;
-    struct ne_xsk_queue queues[MAX_QUEUES];
-    uint64_t tx_no_free;
-    uint32_t xdp_flags;
-};
-
 struct bpf_object;
 
 struct ne_pair {
@@ -182,9 +186,7 @@ struct ne_pair {
     struct xsk_umem *umem;
     int umem_fq_li;
     int umem_fq_q;
-    struct ne_iface locals[MAX_INTERFACES];
     int local_count;
-    struct ne_iface wans[MAX_INTERFACES];
     int wan_count;
     int local_queue_total;
     int wan_queue_total;
@@ -206,13 +208,8 @@ struct core_worker {
     void *context;
 };
 
-struct core_profile {
-    int loaded;
-    struct app_config config;
-};
-
 struct core_runtime {
-    struct core_profile profile;
+    struct app_config config;
     struct ne_pair pair;
     struct ne_ring local_to_crypto[CORE_CRYPTO_WORKERS];
     struct ne_ring wan_to_crypto[CORE_CRYPTO_WORKERS];
