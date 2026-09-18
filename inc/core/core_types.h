@@ -1,12 +1,6 @@
 #ifndef CORE_TYPES_H
 #define CORE_TYPES_H
 
-#include <net/if.h>
-#include <pthread.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <xdp/xsk.h>
-
 #define MAX_INTERFACES 16
 #define MAX_QUEUES 64
 #define MAX_CRYPTO_POLICIES 128
@@ -25,6 +19,27 @@
 #define NE_N_FRAMES 1048576u
 #define NE_BATCH_SIZE 64u
 #define NE_FQ_PREFILL 16384u
+
+/* Shared core and XDP constants. */
+#define IPPROTO_ICMP_VAL 1
+#define IPPROTO_TCP_VAL 6
+#define IPPROTO_UDP_VAL 17
+#define IPPROTO_OSPF_VAL 89
+#define ETH_P_NE_ARP_ENC 0x1048
+#define ETH_P_NE_UDP_ENC 0x104B
+#define ETH_P_CFM 0x8902
+#define ETH_P_ARP_VAL 0x0806
+#define ETH_P_8021Q_VAL 0x8100
+#define PATH_MTU 1500
+#define ETH_FRAME_MAX (14 + PATH_MTU)
+#define ETH_VLAN_FRAME_MAX (18 + PATH_MTU)
+
+#ifndef NE_BPF
+#include <net/if.h>
+#include <pthread.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <xdp/xsk.h>
 
 enum policy_action {
     POLICY_ACTION_BYPASS = 0,
@@ -214,4 +229,5 @@ struct core_runtime {
     int stop_requested;
 };
 
-#endif
+#endif /* NE_BPF */
+#endif /* CORE_TYPES_H */

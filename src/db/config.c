@@ -256,6 +256,7 @@ static int crypto_policy_is_catchall(const struct crypto_policy *cp)
     return 1;
 }
 
+
 #define POL_IN_SRC_NEG  1u
 #define POL_IN_DST_NEG  2u
 

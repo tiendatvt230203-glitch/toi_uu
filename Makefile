@@ -5,7 +5,7 @@ CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/pqc -Isrc/db -I../include -Isr
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
           ./lib/libxdp.so.1 -lpq ./lib/libscrypt.so
 
-BPF_CFLAGS     = -O2 -target bpf -g
+BPF_CFLAGS     = -O2 -target bpf -g -DNE_BPF
 KERNEL_HEADERS = /usr/include
 
 LIB_DIR = lib

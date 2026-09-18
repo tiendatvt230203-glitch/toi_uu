@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+
 #define NE_VAULT_HTTP_TIMEOUT_SEC 10
 #define NE_VAULT_HTTP_BUF       65536
 #define NE_VAULT_VAL_BUF          2048

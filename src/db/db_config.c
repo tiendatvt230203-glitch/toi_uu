@@ -236,6 +236,7 @@ static void trim_spaces_inplace(char *s) {
     s[end - start] = '\0';
 }
 
+
 #define MAX_CIDR_LIST_ITEMS 32
 #define MAX_CIDR_ITEM_LEN 96
 
