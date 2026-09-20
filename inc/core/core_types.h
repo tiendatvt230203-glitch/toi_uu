@@ -15,8 +15,6 @@
 #define NE_L2_PING_ETHERTYPE 0x1056u
 #define NE_L2_OSPF_ETHERTYPE 0x1059u
 #define CORE_MAX_WORKERS 64
-#define CORE_CRYPTO_WORKERS 6
-#define CORE_TX_WORKERS 4
 #define CORE_RING_CAPACITY 16384u
 #define CORE_KEY_LIFETIME_SEC (30u * 24u * 60u * 60u)
 #define CORE_FLOW_ROUTE_SETS 8192u
@@ -44,6 +42,16 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <xdp/xsk.h>
+
+static const uint8_t CORE_CPU_RX_LAN[] = { 0u };
+static const uint8_t CORE_CPU_TX[] = { 1u, 2u, 9u, 10u };
+static const uint8_t CORE_CPU_CRYPTO[] = { 3u, 4u, 5u, 6u, 7u, 8u };
+static const uint8_t CORE_CPU_RX_WAN[] = { 11u };
+
+#define CORE_RX_LAN_SLOTS ((uint32_t)(sizeof(CORE_CPU_RX_LAN) / sizeof(CORE_CPU_RX_LAN[0])))
+#define CORE_RX_WAN_SLOTS ((uint32_t)(sizeof(CORE_CPU_RX_WAN) / sizeof(CORE_CPU_RX_WAN[0])))
+#define CORE_TX_WORKERS ((uint32_t)(sizeof(CORE_CPU_TX) / sizeof(CORE_CPU_TX[0])))
+#define CORE_CRYPTO_WORKERS ((uint32_t)(sizeof(CORE_CPU_CRYPTO) / sizeof(CORE_CPU_CRYPTO[0])))
 
 enum policy_action {
     POLICY_ACTION_BYPASS = 0,

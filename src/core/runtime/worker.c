@@ -107,7 +107,7 @@ int core_worker_select_encrypt_core(const uint8_t *pkt, uint32_t len)
         pthread_mutex_unlock(&g_flow_route_lock);
         return -ENOSPC;
     }
-    for (int core = 1; core < CORE_CRYPTO_WORKERS; core++) {
+    for (uint32_t core = 1; core < CORE_CRYPTO_WORKERS; core++) {
         if (g_worker_flow_count[core] < g_worker_flow_count[chosen])
             chosen = core;
     }
