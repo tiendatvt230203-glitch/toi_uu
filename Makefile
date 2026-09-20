@@ -1,7 +1,7 @@
 CC     = gcc
 CLANG  = clang
 
-CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/pqc -Isrc/db -I../include -Isrc/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
+CFLAGS = -D_GNU_SOURCE -DPQC_FIXED_TEST_KEY=1 -I. -Iinc -Iinc/core -Iinc/pqc -Isrc/db -I../include -Isrc/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
           ./lib/libxdp.so.1 -lpq ./lib/libscrypt.so
 

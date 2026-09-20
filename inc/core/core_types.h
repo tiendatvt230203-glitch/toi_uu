@@ -18,6 +18,9 @@
 #define CORE_CRYPTO_WORKERS 6
 #define CORE_TX_WORKERS 4
 #define CORE_RING_CAPACITY 16384u
+#define CORE_KEY_LIFETIME_SEC (30u * 24u * 60u * 60u)
+#define CORE_FLOW_ROUTE_SETS 8192u
+#define CORE_FLOW_ROUTE_WAYS 8u
 #define NE_FRAME 2048u
 #define NE_N_FRAMES 1048576u
 #define NE_BATCH_SIZE 64u
@@ -37,6 +40,7 @@
 #ifndef NE_BPF
 #include <net/if.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <xdp/xsk.h>
@@ -206,6 +210,16 @@ struct core_worker {
     int cpu_id;
     int running;
     void *context;
+};
+
+struct core_flow_route {
+    uint32_t ip_a;
+    uint32_t ip_b;
+    uint16_t port_a;
+    uint16_t port_b;
+    uint8_t protocol;
+    uint8_t worker_idx;
+    atomic_uchar valid;
 };
 
 struct core_runtime {
