@@ -25,8 +25,7 @@ APP_SRC = main.c \
           $(PQC_SRCS)
 APP_OBJ = $(APP_SRC:.c=.o)
 
-DB_SRC = src/db/config.c \
-         src/db/db_config.c \
+DB_SRC = src/db/db_config.c \
          src/db/db_env.c \
          src/db/db_runtime.c \
          src/db/vault.c

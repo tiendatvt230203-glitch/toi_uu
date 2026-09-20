@@ -24,10 +24,7 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    if (eth->h_proto == bpf_htons(ETH_P_8021Q_VAL)) {
-        if (pkt_len > ETH_VLAN_FRAME_MAX)
-            return XDP_DROP;
-    } else if (pkt_len > ETH_FRAME_MAX) {
+    if (pkt_len > ETH_FRAME_MAX) {
         return XDP_DROP;
     }
 

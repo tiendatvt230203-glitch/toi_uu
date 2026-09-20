@@ -13,6 +13,161 @@
 #include <unistd.h>
 #include "pqc_handshake.h"
 #include "pqc_vault.h"
+static uint32_t ipv4_prefix_to_mask_be(int prefix_len) {
+    if (prefix_len <= 0)
+        return 0;
+    if (prefix_len >= 32)
+        return htonl(0xFFFFFFFFu);
+    return htonl(0xFFFFFFFFu << (32 - prefix_len));
+}
+
+static int ipv4_mask_be_is_contiguous(uint32_t mask_be) {
+    uint32_t m = ntohl(mask_be);
+    if (m == 0)
+        return 1;
+    uint32_t inv = ~m;
+    return (inv & (inv + 1u)) == 0;
+}
+
+static int parse_ipv4_netmask_be(const char *s, uint32_t *mask_out) {
+    struct in_addr a;
+
+    if (!s || !mask_out || !s[0])
+        return -1;
+    if (inet_pton(AF_INET, s, &a) != 1)
+        return -1;
+    if (!ipv4_mask_be_is_contiguous(a.s_addr))
+        return -1;
+    *mask_out = a.s_addr;
+    return 0;
+}
+
+static int parse_ip_cidr(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t *network) {
+    char buf[128];
+    const char *ip_part;
+    const char *suffix = NULL;
+
+    if (!str || !ip || !netmask)
+        return -1;
+
+    strncpy(buf, str, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *slash = strchr(buf, '/');
+    if (slash) {
+        *slash = '\0';
+        suffix = slash + 1;
+        while (*suffix == ' ' || *suffix == '\t')
+            suffix++;
+        if (!suffix[0])
+            return -1;
+    }
+
+    ip_part = buf;
+    while (*ip_part == ' ' || *ip_part == '\t')
+        ip_part++;
+
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip_part, &addr) != 1)
+        return -1;
+
+    *ip = addr.s_addr;
+
+    if (suffix) {
+        if (strchr(suffix, '.')) {
+            if (parse_ipv4_netmask_be(suffix, netmask) != 0)
+                return -1;
+        } else {
+            char *end = NULL;
+            long plen = strtol(suffix, &end, 10);
+            if (!end || *end != '\0' || plen < 0 || plen > 32)
+                return -1;
+            *netmask = ipv4_prefix_to_mask_be((int)plen);
+        }
+    } else {
+        *netmask = ipv4_prefix_to_mask_be(32);
+    }
+
+    if (network)
+        *network = *ip & *netmask;
+
+    return 0;
+}
+
+int config_policy_db_id_taken(const struct app_config *cfg, int db_id)
+{
+    if (!cfg || db_id <= 0)
+        return 0;
+    for (int i = 0; i < cfg->policy_count; i++) {
+        if (cfg->policies[i].db_id == db_id)
+            return 1;
+    }
+    return 0;
+}
+
+int config_wan_live(const struct app_config *cfg, int wan_idx)
+{
+    if (!cfg || wan_idx < 0 || wan_idx >= cfg->wan_count)
+        return 0;
+    return cfg->wans[wan_idx].dataplane ? 1 : 0;
+}
+
+int config_wan_cfg_to_dp(const struct app_config *cfg, int cfg_idx)
+{
+    if (!config_wan_live(cfg, cfg_idx))
+        return -1;
+    int dp = 0;
+    for (int i = 0; i < cfg_idx; i++) {
+        if (config_wan_live(cfg, i))
+            dp++;
+    }
+    return dp;
+}
+
+int config_validate(struct app_config *cfg) {
+    if (!cfg || cfg->profile_id <= 0) {
+        fprintf(stderr, "CONFIG: active profile is not specified\n");
+        return -1;
+    }
+
+    for (int i = 0; i < cfg->local_count; i++) {
+        struct local_config *local = &cfg->locals[i];
+
+        if (local->ifname[0] == '\0') {
+            fprintf(stderr, "LOCAL[%d]: interface not specified\n", i);
+            return -1;
+        }
+    }
+
+    for (int i = 0; i < cfg->wan_count; i++) {
+        struct wan_config *wan = &cfg->wans[i];
+
+        if (wan->ifname[0] == '\0') {
+            fprintf(stderr, "WAN[%d]: interface not specified\n", i);
+            return -1;
+        }
+
+    }
+
+    for (int i = 0; i < cfg->bridge_count; i++) {
+        const struct bridge_config *bridge = &cfg->bridges[i];
+
+        if (bridge->local_slot < 0 || bridge->local_slot >= cfg->local_count ||
+            bridge->wan_slot < 0 || bridge->wan_slot >= cfg->wan_count) {
+            fprintf(stderr,
+                    "BRIDGE[%d]: invalid slots local=%d wan=%d\n",
+                    i, bridge->local_slot, bridge->wan_slot);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int parse_ip_cidr_pub(const char *str, uint32_t *ip, uint32_t *mask, uint32_t *net)
+{
+    return parse_ip_cidr(str, ip, mask, net);
+}
 
 static int db_load_local_pqc_identity(const char *fingerprint,
                                       char *private_key, size_t private_size,

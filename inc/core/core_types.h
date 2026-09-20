@@ -31,10 +31,8 @@
 #define ETH_P_NE_ARP_ENC 0x1048
 #define ETH_P_CFM 0x8902
 #define ETH_P_ARP_VAL 0x0806
-#define ETH_P_8021Q_VAL 0x8100
 #define PATH_MTU 1500
 #define ETH_FRAME_MAX (14 + PATH_MTU)
-#define ETH_VLAN_FRAME_MAX (18 + PATH_MTU)
 
 #ifndef NE_BPF
 #include <net/if.h>

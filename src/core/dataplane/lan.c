@@ -10,10 +10,15 @@
 #include <netinet/in.h>
 
 
-int core_lan_process(uint8_t ip_protocol)
+int core_lan_process(const struct app_config *cfg, const uint8_t *pkt,
+                     uint32_t len, uint8_t ip_protocol)
 {
-    if (core_tx_match_out() <= 0)
+    const struct crypto_policy *policy;
+
+    if (core_tx_match_out(cfg, pkt, len, &policy) <= 0)
         return -EACCES;
+    if (policy->action == POLICY_ACTION_BYPASS)
+        return 0;
 
     if (ip_protocol == IPPROTO_TCP)
         return core_tcp_handle_lan_wan();

@@ -10,7 +10,9 @@
 #include <errno.h>
 #include <netinet/in.h>
 
-int core_wan_process(uint16_t wire_ethertype)
+int core_wan_process(const struct app_config *cfg, uint8_t *pkt,
+                     uint32_t *len, uint16_t wire_ethertype,
+                     uint8_t wire_policy_id)
 {
     int rc;
 
@@ -30,7 +32,7 @@ int core_wan_process(uint16_t wire_ethertype)
     if (rc != 0)
         return rc;
 
-    if (core_tx_match_in() <= 0)
+    if (!len || core_tx_match_in(cfg, pkt, *len, wire_policy_id) <= 0)
         return -EACCES;
     return 0;
 }
