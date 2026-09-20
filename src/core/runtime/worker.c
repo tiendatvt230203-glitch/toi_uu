@@ -17,11 +17,24 @@ int core_worker_pin_cpu()
 
 }
 
+int core_worker_select_encrypt_core()
+{
+    /* LAN -> WAN: hash 5-tuple de chon crypto worker. */
+    return -ENOSYS;
+}
+
+int core_worker_select_decrypt_core()
+{
+    /* WAN -> LAN: core ID tren goi tin chon crypto worker giai ma. */
+    return -ENOSYS;
+}
+
 int core_worker_rx_submit()
 {
     /* Khung nối RX, chưa truyền packet/slot:
-     * ne_fill_slot() -> ne_recv_slot() -> ne_ring_try_push().
-     * LAN RX và WAN RX cùng dùng đường này, khác ring đích.
+     * ne_fill_slot() -> ne_recv_slot()
+     * LAN: core_worker_select_encrypt_core() -> local_to_crypto[worker].
+     * WAN: core_worker_select_decrypt_core() -> wan_to_crypto[worker].
      */
 }
 
