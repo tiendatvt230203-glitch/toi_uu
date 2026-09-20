@@ -28,9 +28,9 @@ int xdp_redirect_prog(struct xdp_md *ctx)
         return XDP_DROP;
     }
 
-    if (eth->h_proto == bpf_htons(ETH_P_ARP_VAL)) {
-        goto redirect;
-    }
+    if (eth->h_proto == bpf_htons(ETH_P_ARP_VAL) ||
+        eth->h_proto == bpf_htons(ETH_P_NE_ARP_ENC))
+        return XDP_PASS;
 
     if (eth->h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = (void *)(eth + 1);

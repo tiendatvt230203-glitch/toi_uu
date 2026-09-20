@@ -19,6 +19,10 @@
 #define CORE_KEY_LIFETIME_SEC (30u * 24u * 60u * 60u)
 #define CORE_FLOW_ROUTE_SETS 8192u
 #define CORE_FLOW_ROUTE_WAYS 8u
+#define CORE_WAN_FLOW_SETS 512u
+#define CORE_WAN_FLOW_WAYS 4u
+#define CORE_TCP_WAN_PACKET_WINDOW 8192u
+#define CORE_UDP_WAN_PACKET_WINDOW 16384u
 #define NE_FRAME 2048u
 #define NE_N_FRAMES 1048576u
 #define NE_BATCH_SIZE 64u
@@ -166,6 +170,31 @@ struct ne_packet {
     uint8_t wan_idx;
     uint8_t local_idx;
     uint8_t tx_slot;
+};
+
+struct core_wan_flow {
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint16_t packet_count;
+    uint8_t wan_idx;
+    uint8_t valid;
+    uint8_t protocol;
+    uint64_t stamp;
+};
+
+struct core_fragment_slot {
+    uint64_t id;
+    uint64_t seen_ns;
+    uint16_t first_len;
+    uint16_t second_len;
+    uint8_t policy_id;
+    uint8_t core_id;
+    uint8_t seen;
+    uint8_t eth[14];
+    uint8_t first[1500];
+    uint8_t second[1500];
 };
 
 struct ne_ring {
