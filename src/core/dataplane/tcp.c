@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <string.h>
 #include <limits.h>
+#include <time.h>
 
 static int core_tcp_decrypt(uint8_t *pkt, uint32_t *len, const uint8_t key[32]);
 static int core_tcp_encrypt(uint8_t *pkt, uint32_t *len, uint32_t capacity,
@@ -122,7 +123,7 @@ static int core_tcp_decrypt(uint8_t *pkt, uint32_t *len, const uint8_t key[32])
 }
 
 static _Thread_local struct core_wan_flow
-    g_tcp_wan_flows[CORE_WAN_FLOW_SETS][CORE_WAN_FLOW_WAYS];
+    g_tcp_wan_flows[CORE_WAN_FLOW_ROWS][CORE_WAN_FLOW_SLOTS_PER_ROW];
 static _Thread_local uint64_t g_tcp_wan_clock;
 static _Thread_local int64_t g_tcp_wan_current[MAX_INTERFACES];
 static _Thread_local int g_tcp_wan_weights[MAX_INTERFACES];
@@ -167,11 +168,10 @@ static int core_tcp_pick_wan(const struct app_config *cfg)
 static int core_tcp_route(const struct app_config *cfg, const uint8_t *pkt,
                           uint32_t len, uint8_t *wan_idx, uint16_t window)
 {
-    struct core_wan_flow *set, *slot = NULL;
-    uint32_t ihl, hash = 2166136261u;
+    uint32_t ihl;
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
-    int victim = 0, selected;
+    int selected;
 
     if (!cfg || !pkt || !wan_idx || len < 54 || pkt[12] != 8 || pkt[13] != 0 ||
         (pkt[14] >> 4) != 4 || pkt[23] != IPPROTO_TCP_VAL)
@@ -183,46 +183,74 @@ static int core_tcp_route(const struct app_config *cfg, const uint8_t *pkt,
     memcpy(&dst_ip, pkt + 30, sizeof(dst_ip));
     src_port = ((uint16_t)pkt[14 + ihl] << 8) | pkt[15 + ihl];
     dst_port = ((uint16_t)pkt[16 + ihl] << 8) | pkt[17 + ihl];
+
+    /* Hash IP/port nguồn và đích để chọn hàng. */
+    uint32_t flow_hash = 2166136261u;
+
     for (uint32_t i = 26; i < 34; i++)
-        hash = (hash ^ pkt[i]) * 16777619u;
+        flow_hash = (flow_hash ^ pkt[i]) * 16777619u;
+
     for (uint32_t i = 14 + ihl; i < 18 + ihl; i++)
-        hash = (hash ^ pkt[i]) * 16777619u;
-    set = g_tcp_wan_flows[hash & (CORE_WAN_FLOW_SETS - 1u)];
-    for (int way = 0; way < (int)CORE_WAN_FLOW_WAYS; way++) {
-        if (set[way].valid && set[way].src_ip == src_ip &&
-            set[way].dst_ip == dst_ip && set[way].src_port == src_port &&
-            set[way].dst_port == dst_port) {
-            slot = &set[way];
-            break;
+        flow_hash = (flow_hash ^ pkt[i]) * 16777619u;
+
+    uint32_t row_index = flow_hash & (CORE_WAN_FLOW_ROWS - 1u);
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -errno;
+    uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+    struct core_wan_flow *row = g_tcp_wan_flows[row_index];
+    struct core_wan_flow *flow = NULL;
+    int replace_column = 0;
+
+    /* Tìm connection đã có trong hàng. */
+    for (int column = 0; column < (int)CORE_WAN_FLOW_SLOTS_PER_ROW; column++) {
+        /* Hết hạn: xóa ô, valid trở về 0 để dùng lại. */
+        if (row[column].valid &&
+            now_ns - row[column].last_seen_ns >= CORE_ROUTE_IDLE_NS)
+            memset(&row[column], 0, sizeof(row[column]));
+
+        if (row[column].valid &&
+            row[column].src_ip == src_ip &&
+            row[column].dst_ip == dst_ip &&
+            row[column].src_port == src_port &&
+            row[column].dst_port == dst_port) {
+            flow = &row[column];
         }
-        if (!set[way].valid || set[way].stamp < set[victim].stamp)
-            victim = way;
+
+        if (!row[column].valid ||
+            row[column].stamp < row[replace_column].stamp) {
+            replace_column = column;
+        }
     }
-    if (!slot)
-        slot = &set[victim];
-    if (!slot->valid || slot->src_ip != src_ip || slot->dst_ip != dst_ip ||
-        slot->src_port != src_port || slot->dst_port != dst_port ||
-        slot->wan_idx >= cfg->wan_count ||
-        !cfg->wans[slot->wan_idx].dataplane ||
-        cfg->wans[slot->wan_idx].bandwidth_weight <= 0 ||
-        (window && slot->packet_count == 0)) {
+
+    /* Chưa có: dùng cột trống hoặc cũ nhất. */
+    if (!flow)
+        flow = &row[replace_column];
+
+    if (!flow->valid || flow->src_ip != src_ip || flow->dst_ip != dst_ip ||
+        flow->src_port != src_port || flow->dst_port != dst_port ||
+        flow->wan_idx >= cfg->wan_count ||
+        !cfg->wans[flow->wan_idx].dataplane ||
+        cfg->wans[flow->wan_idx].bandwidth_weight <= 0 ||
+        (window && flow->packet_count == 0)) {
         selected = core_tcp_pick_wan(cfg);
         if (selected < 0)
             return -ENETUNREACH;
-        slot->src_ip = src_ip;
-        slot->dst_ip = dst_ip;
-        slot->src_port = src_port;
-        slot->dst_port = dst_port;
-        slot->wan_idx = (uint8_t)selected;
-        slot->packet_count = 0;
-        slot->valid = 1;
+        flow->src_ip = src_ip;
+        flow->dst_ip = dst_ip;
+        flow->src_port = src_port;
+        flow->dst_port = dst_port;
+        flow->wan_idx = (uint8_t)selected;
+        flow->packet_count = 0;
+        flow->valid = 1;
     }
-    slot->stamp = ++g_tcp_wan_clock;
-    *wan_idx = slot->wan_idx;
+    flow->stamp = ++g_tcp_wan_clock;
+    flow->last_seen_ns = now_ns;
+    *wan_idx = flow->wan_idx;
     if (window) {
-        slot->packet_count++;
-        if (slot->packet_count >= window)
-            slot->packet_count = 0;
+        flow->packet_count++;
+        if (flow->packet_count >= window)
+            flow->packet_count = 0;
     }
     return 0;
 }

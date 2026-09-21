@@ -19,8 +19,9 @@
 #define CORE_KEY_LIFETIME_SEC (30u * 24u * 60u * 60u)
 #define CORE_FLOW_ROUTE_SETS 8192u
 #define CORE_FLOW_ROUTE_WAYS 8u
-#define CORE_WAN_FLOW_SETS 512u
-#define CORE_WAN_FLOW_WAYS 4u
+#define CORE_WAN_FLOW_ROWS 512u
+#define CORE_WAN_FLOW_SLOTS_PER_ROW 4u
+#define CORE_ROUTE_IDLE_NS (60ULL * 1000000000ULL)
 #define CORE_TCP_WAN_PACKET_WINDOW 8192u
 #define CORE_UDP_WAN_PACKET_WINDOW 16384u
 #define NE_FRAME 2048u
@@ -182,6 +183,7 @@ struct core_wan_flow {
     uint8_t valid;
     uint8_t protocol;
     uint64_t stamp;
+    uint64_t last_seen_ns;
 };
 
 struct core_fragment_slot {

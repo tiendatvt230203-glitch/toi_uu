@@ -3,9 +3,10 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <string.h>
+#include <time.h>
 
 static _Thread_local struct core_wan_flow
-    g_bypass_flows[CORE_WAN_FLOW_SETS][CORE_WAN_FLOW_WAYS];
+    g_bypass_flows[CORE_WAN_FLOW_ROWS][CORE_WAN_FLOW_SLOTS_PER_ROW];
 static _Thread_local uint64_t g_bypass_clock;
 static _Thread_local int64_t g_bypass_current[MAX_INTERFACES];
 static _Thread_local int g_bypass_weights[MAX_INTERFACES];
@@ -85,13 +86,21 @@ static int core_bypass_route(const struct app_config *cfg, const uint8_t *pkt,
     hash = (hash ^ protocol) * 16777619u;
     hash = (hash ^ src_port) * 16777619u;
     hash = (hash ^ dst_port) * 16777619u;
-    set = g_bypass_flows[hash & (CORE_WAN_FLOW_SETS - 1u)];
-    for (int way = 0; way < (int)CORE_WAN_FLOW_WAYS; way++) {
+    set = g_bypass_flows[hash & (CORE_WAN_FLOW_ROWS - 1u)];
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -errno;
+    uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+    for (int way = 0; way < (int)CORE_WAN_FLOW_SLOTS_PER_ROW; way++) {
+        /* Hết hạn: xóa ô, valid trở về 0 để dùng lại. */
+        if (set[way].valid &&
+            now_ns - set[way].last_seen_ns >= CORE_ROUTE_IDLE_NS)
+            memset(&set[way], 0, sizeof(set[way]));
+
         if (set[way].valid && set[way].src_ip == src_ip &&
             set[way].dst_ip == dst_ip && set[way].src_port == src_port &&
             set[way].dst_port == dst_port && set[way].protocol == protocol) {
             slot = &set[way];
-            break;
         }
         if (!set[way].valid || set[way].stamp < set[victim].stamp)
             victim = way;
@@ -117,6 +126,7 @@ static int core_bypass_route(const struct app_config *cfg, const uint8_t *pkt,
         slot->valid = 1;
     }
     slot->stamp = ++g_bypass_clock;
+    slot->last_seen_ns = now_ns;
     *wan_idx = slot->wan_idx;
     if (per_packet) {
         slot->packet_count++;
