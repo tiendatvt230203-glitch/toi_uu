@@ -264,8 +264,8 @@ struct core_runtime {
     struct ne_pair pair;
     struct ne_ring local_to_crypto[CORE_CRYPTO_WORKERS];
     struct ne_ring wan_to_crypto[CORE_CRYPTO_WORKERS];
-    struct ne_ring crypto_to_lan[MAX_INTERFACES][CORE_CRYPTO_WORKERS];
-    struct ne_ring crypto_to_wan[MAX_INTERFACES][CORE_CRYPTO_WORKERS];
+    struct ne_ring to_lan_tx[MAX_INTERFACES][CORE_TX_WORKERS];
+    struct ne_ring to_wan_tx[MAX_INTERFACES][CORE_TX_WORKERS];
     struct core_worker workers[CORE_MAX_WORKERS];
     int worker_count;
     int initialized;

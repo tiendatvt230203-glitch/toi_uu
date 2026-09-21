@@ -1,5 +1,6 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
+#include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include "../inc/core/core_types.h"
@@ -31,6 +32,19 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     if (proto == bpf_htons(ETH_P_ARP) ||
         proto == bpf_htons(ETH_P_NE_ARP_ENC))
         return XDP_PASS;
+
+    if (proto == bpf_htons(0x0800)) {
+        struct iphdr *ip = (void *)(eth + 1);
+
+        if ((void *)(ip + 1) > data_end)
+            return XDP_PASS;
+        if (ip->protocol == IPPROTO_TCP_VAL ||
+            ip->protocol == IPPROTO_UDP_VAL ||
+            ip->protocol == IPPROTO_ICMP_VAL ||
+            ip->protocol == IPPROTO_OSPF_VAL)
+            goto redirect;
+        return XDP_PASS;
+    }
 
     if (proto == bpf_htons(NE_L2_TCP_ETHERTYPE) ||
         proto == bpf_htons(NE_L2_UDP_ETHERTYPE) ||
