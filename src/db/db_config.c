@@ -1,5 +1,6 @@
 #include "db_config.h"
 #include "db_env.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -486,7 +487,7 @@ static void profile_commit_bridge_pair(struct app_config *cfg,
 
     if (local_idx < 0 || wan_cfg_idx < 0)
         return;
-    if (cfg->bridge_count >= MAX_BRIDGES_PER_PROFILE)
+    if (cfg->bridge_count >= 1)
         return;
 
     wan_dp = config_wan_cfg_to_dp(cfg, wan_cfg_idx);
@@ -592,7 +593,12 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         "SELECT id, name, 1 AS enabled FROM ne_profiles WHERE id = $1",
         1, NULL, params, NULL, NULL, 0);
 
-    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0) {
+    if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[DB] profile query failed: %s\n", PQerrorMessage(conn));
+        PQclear(res);
+        return -1;
+    }
+    if (PQntuples(res) == 0) {
         fprintf(stderr, "[DB] ne_profiles id=%d not found\n", profile_id);
         PQclear(res);
         return -1;
@@ -669,10 +675,10 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         if (cp_base.action == POLICY_ACTION_BYPASS) {
             cp_base.id = 0;
         } else {
-            /* Every encrypt policy is L2 PQC. */
+
             cp_base.action = POLICY_ACTION_ENCRYPT_L2;
-            /* NE will request and own this policy input before it calls PQC.
-             * The loader no longer starts a handshake as a side effect. */
+
+
             int wire_id = alloc_wire_policy_id(db_policy_id, wire_id_used);
             if (wire_id < 0) {
                 fprintf(stderr, "[DB CRYPTO] no free wire policy id for encrypt policy %d\n",
@@ -768,10 +774,10 @@ static int load_local_rows(struct app_config *cfg, PGresult *res) {
     int nrows = PQntuples(res);
     if (nrows == 0) {
         fprintf(stderr, "[DB] No LAN (ne_lan) for this profile\n");
-        return -1;
+        return -ENODEV;
     }
-    if (nrows > MAX_INTERFACES) {
-        fprintf(stderr, "[DB] Too many LAN rows (%d > %d)\n", nrows, MAX_INTERFACES);
+    if (nrows > 1) {
+        fprintf(stderr, "[DB] Too many LAN rows (%d > %d)\n", nrows, 1);
         return -1;
     }
 
@@ -795,10 +801,10 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res) {
     int nrows = PQntuples(res);
     if (nrows == 0) {
         fprintf(stderr, "[DB] No WAN (ne_wan) for this profile\n");
-        return -1;
+        return -ENODEV;
     }
-    if (nrows > MAX_INTERFACES) {
-        fprintf(stderr, "[DB] Too many WAN rows (%d > %d)\n", nrows, MAX_INTERFACES);
+    if (nrows > 1) {
+        fprintf(stderr, "[DB] Too many WAN rows (%d > %d)\n", nrows, 1);
         return -1;
     }
 
@@ -836,7 +842,7 @@ static int db_verify_profile_id(PGconn *conn, int profile_id) {
     if (PQntuples(res) == 0) {
         fprintf(stderr, "[DB] ne_profiles id=%d not found\n", profile_id);
         PQclear(res);
-        return -1;
+        return -ENOENT;
     }
     PQclear(res);
     return 0;
@@ -858,12 +864,9 @@ static int db_load_lan_for_profile(PGconn *conn, struct app_config *cfg, int pro
         return -1;
     }
 
-    if (load_local_rows(cfg, res) != 0) {
-        PQclear(res);
-        return -1;
-    }
+    int rc = load_local_rows(cfg, res);
     PQclear(res);
-    return 0;
+    return rc;
 }
 
 static int db_load_wan_for_profile(PGconn *conn, struct app_config *cfg, int profile_id) {
@@ -882,12 +885,9 @@ static int db_load_wan_for_profile(PGconn *conn, struct app_config *cfg, int pro
         return -1;
     }
 
-    if (load_wan_rows(cfg, res) != 0) {
-        PQclear(res);
-        return -1;
-    }
+    int rc = load_wan_rows(cfg, res);
     PQclear(res);
-    return 0;
+    return rc;
 }
 
 int config_apply_crypto_from_policies(struct app_config *cfg) {
@@ -918,12 +918,12 @@ int config_apply_crypto_from_policies(struct app_config *cfg) {
 }
 
 static int fetch_config_from_db(struct app_config *cfg, PGconn *conn, int profile_id) {
-    if (db_verify_profile_id(conn, profile_id) != 0)
-        return -1;
-    if (db_load_lan_for_profile(conn, cfg, profile_id) != 0)
-        return -1;
-    if (db_load_wan_for_profile(conn, cfg, profile_id) != 0)
-        return -1;
+    int rc = db_verify_profile_id(conn, profile_id);
+    if (rc) return rc;
+    rc = db_load_lan_for_profile(conn, cfg, profile_id);
+    if (rc) return rc;
+    rc = db_load_wan_for_profile(conn, cfg, profile_id);
+    if (rc) return rc;
     if (load_profiles_and_policies(cfg, conn, profile_id) != 0)
         return -1;
     return 0;
@@ -946,15 +946,20 @@ int config_load_from_db(struct app_config *cfg, int profile_id, const char *conn
     strncpy(cfg->bpf_wan_file, "lib/wan.o", sizeof(cfg->bpf_wan_file) - 1);
 
     PGconn *conn = PQconnectdbParams(pg.keywords, pg.values, 0);
+    if (!conn) {
+        fprintf(stderr, "[DB] failed to allocate PostgreSQL connection\n");
+        return -1;
+    }
     if (PQstatus(conn) != CONNECTION_OK) {
         fprintf(stderr, "[DB] Connection failed: %s\n", PQerrorMessage(conn));
         PQfinish(conn);
         return -1;
     }
 
-    if (fetch_config_from_db(cfg, conn, profile_id) != 0) {
+    int rc = fetch_config_from_db(cfg, conn, profile_id);
+    if (rc != 0) {
         PQfinish(conn);
-        return -1;
+        return rc;
     }
 
     PQfinish(conn);

@@ -1,29 +1,19 @@
 #ifndef CORE_TYPES_H
 #define CORE_TYPES_H
 
-#define MAX_INTERFACES 16
 #define MAX_QUEUES 64
 #define MAX_CRYPTO_POLICIES 128
-#define MAX_BRIDGES_PER_PROFILE 16
 #define PQC_PEER_PUB_MAX 8192
 #define MAC_LEN 6
-#define NE_PROFILE_SLOTS 1
 #define POLICY_PROTO_ANY 0
 #define POLICY_PROTO_TCP_UDP 254
 #define NE_L2_TCP_ETHERTYPE  0x1054u
 #define NE_L2_UDP_ETHERTYPE  0x1055u
 #define NE_L2_PING_ETHERTYPE 0x1056u
 #define NE_L2_OSPF_ETHERTYPE 0x1059u
-#define CORE_MAX_WORKERS 64
 #define CORE_RING_CAPACITY 16384u
-#define CORE_KEY_LIFETIME_SEC (30u * 24u * 60u * 60u)
 #define CORE_FLOW_ROUTE_SETS 8192u
 #define CORE_FLOW_ROUTE_WAYS 8u
-#define CORE_WAN_FLOW_ROWS 512u
-#define CORE_WAN_FLOW_SLOTS_PER_ROW 4u
-#define CORE_ROUTE_IDLE_NS (60ULL * 1000000000ULL)
-#define CORE_TCP_WAN_PACKET_WINDOW 8192u
-#define CORE_UDP_WAN_PACKET_WINDOW 16384u
 #define NE_FRAME 4096u
 #define NE_N_FRAMES 524288u
 #define NE_XDP_PACKET_HEADROOM 256u
@@ -34,7 +24,6 @@
 #define CORE_JUMBO_CORE_MASK 0x7fu
 #define CORE_JUMBO_SHIM_SIZE 16u
 #define CORE_JUMBO_SLOTS 4096u
-#define CORE_JUMBO_TIMEOUT_NS (200ULL * 1000000ULL)
 #define NE_BATCH_SIZE 64u
 #define NE_FQ_PREFILL 16384u
 #define NE_FQ_REFILL_BUDGET 1024u
@@ -45,13 +34,12 @@
 #define XDP_USE_SG (1u << 4)
 #endif
 
-/* Shared core and XDP constants. */
+
 #define IPPROTO_ICMP_VAL 1
 #define IPPROTO_TCP_VAL 6
 #define IPPROTO_UDP_VAL 17
 #define IPPROTO_OSPF_VAL 89
 #define ETH_P_NE_ARP_ENC 0x1048
-#define ETH_P_CFM 0x8902
 #define ETH_P_ARP_VAL 0x0806
 #define PATH_MTU 9000
 #define ETH_FRAME_MAX (14 + PATH_MTU)
@@ -65,14 +53,10 @@
 #include <xdp/xsk.h>
 
 static const uint8_t CORE_CPU_RX_LAN[] = { 0u };
-static const uint8_t CORE_CPU_TX[] = { 1u, 2u, 9u, 10u };
-static const uint8_t CORE_CPU_CRYPTO[] = { 3u, 4u, 5u, 6u, 7u, 8u };
+static const uint8_t CORE_CPU_TX[] = { 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u };
 static const uint8_t CORE_CPU_RX_WAN[] = { 11u };
 
-#define CORE_RX_LAN_SLOTS ((uint32_t)(sizeof(CORE_CPU_RX_LAN) / sizeof(CORE_CPU_RX_LAN[0])))
-#define CORE_RX_WAN_SLOTS ((uint32_t)(sizeof(CORE_CPU_RX_WAN) / sizeof(CORE_CPU_RX_WAN[0])))
 #define CORE_TX_WORKERS ((uint32_t)(sizeof(CORE_CPU_TX) / sizeof(CORE_CPU_TX[0])))
-#define CORE_CRYPTO_WORKERS ((uint32_t)(sizeof(CORE_CPU_CRYPTO) / sizeof(CORE_CPU_CRYPTO[0])))
 
 enum policy_action {
     POLICY_ACTION_BYPASS = 0,
@@ -87,8 +71,7 @@ enum ne_packet_dir {
 enum core_worker_role {
     CORE_WORKER_LAN_RX = 1,
     CORE_WORKER_WAN_RX = 2,
-    CORE_WORKER_CRYPTO = 3,
-    CORE_WORKER_TX = 4
+    CORE_WORKER_TX = 3
 };
 
 struct crypto_policy {
@@ -160,11 +143,11 @@ struct app_config {
     int profile_id;
     char profile_name[64];
     int enabled;
-    struct local_config locals[MAX_INTERFACES];
+    struct local_config locals[1];
     int local_count;
-    struct wan_config wans[MAX_INTERFACES];
+    struct wan_config wans[1];
     int wan_count;
-    struct bridge_config bridges[MAX_BRIDGES_PER_PROFILE];
+    struct bridge_config bridges[1];
     int bridge_count;
     struct pqc_profile_config pqc;
     char bpf_lan_file[256];
@@ -192,19 +175,6 @@ struct ne_packet {
     uint8_t tx_slot;
 };
 
-struct core_wan_flow {
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint16_t packet_count;
-    uint8_t wan_idx;
-    uint8_t valid;
-    uint8_t protocol;
-    uint64_t stamp;
-    uint64_t last_seen_ns;
-};
-
 struct core_packet_batch {
     uint8_t data[NE_PACKET_MAX_SEGMENTS][NE_FRAME_DATA_MAX];
     uint32_t len[NE_PACKET_MAX_SEGMENTS];
@@ -212,7 +182,6 @@ struct core_packet_batch {
 };
 
 struct core_fragment_slot {
-    uint64_t seen_ns;
     uint32_t id;
     uint16_t total_len;
     uint16_t wire_type;
@@ -262,12 +231,13 @@ struct ne_pair {
     int local_queue_total;
     int wan_queue_total;
     struct ne_pool pool;
-    struct bpf_object *bpf_locals[MAX_INTERFACES];
-    struct bpf_object *bpf_wans[MAX_INTERFACES];
-    uint8_t xdp_local_on[MAX_INTERFACES];
-    uint8_t xdp_wan_on[MAX_INTERFACES];
-    uint8_t local_live[MAX_INTERFACES];
-    uint8_t wan_live[MAX_INTERFACES];
+    struct bpf_object *bpf_locals[1];
+    struct bpf_object *bpf_wans[1];
+    uint8_t xdp_local_on[1];
+    uint8_t xdp_wan_on[1];
+    uint8_t local_live[1];
+    uint8_t wan_live[1];
+    uint8_t promisc_owned[2];
     uint32_t xdp_flags;
 };
 
@@ -287,23 +257,23 @@ struct core_flow_route {
     uint16_t port_b;
     uint8_t protocol;
     uint8_t worker_idx;
-    uint8_t tx_slot;
     atomic_uchar valid;
 };
 
 struct core_runtime {
+    pthread_rwlock_t config_lock;
     struct app_config config;
     struct ne_pair pair;
-    struct ne_ring local_to_crypto[CORE_CRYPTO_WORKERS];
-    struct ne_ring wan_to_crypto[CORE_CRYPTO_WORKERS];
-    struct ne_ring to_lan_tx[MAX_INTERFACES][CORE_TX_WORKERS];
-    struct ne_ring to_wan_tx[MAX_INTERFACES][CORE_TX_WORKERS];
-    struct core_worker workers[CORE_MAX_WORKERS];
+    struct ne_ring rx_to_tx[2][CORE_TX_WORKERS];
+    struct ne_ring tx_pending[2][CORE_TX_WORKERS];
+    struct core_worker workers[sizeof(CORE_CPU_RX_LAN) / sizeof(CORE_CPU_RX_LAN[0]) +
+                               sizeof(CORE_CPU_TX) / sizeof(CORE_CPU_TX[0]) +
+                               sizeof(CORE_CPU_RX_WAN) / sizeof(CORE_CPU_RX_WAN[0])];
     int worker_count;
     int initialized;
     int running;
     atomic_int stop_requested;
 };
 
-#endif /* NE_BPF */
-#endif /* CORE_TYPES_H */
+#endif
+#endif

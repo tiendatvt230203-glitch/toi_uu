@@ -1,4 +1,4 @@
-#include "../../../inc/core/interface/interface.h"
+#include "../../../inc/interface/interface.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -7,8 +7,10 @@
 #include <dirent.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #include <linux/if_link.h>
-#include "../../../inc/core/interface/xdp.h"
+#include "../../../inc/interface/xdp.h"
 
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop)
 {
@@ -225,6 +227,34 @@ static int queue_count(const char *ifname)
     return count;
 }
 
+static int interface_promisc(struct ne_pair *p, int dir, int enable)
+{
+    if (!enable && !p->promisc_owned[dir]) return 0;
+    const char *name = dir ? p->config->wans[0].ifname : p->config->locals[0].ifname;
+    struct ifreq request = {0};
+    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", name);
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -errno;
+    int rc = 0;
+    if (enable && (ioctl(fd, SIOCGIFMTU, &request) || request.ifr_mtu != PATH_MTU)) {
+        fprintf(stderr, "[INTERFACE] %s must use MTU %d\n", name, PATH_MTU);
+        rc = -EMSGSIZE;
+    } else if (ioctl(fd, SIOCGIFFLAGS, &request)) {
+        rc = -errno;
+    } else if (enable && !(request.ifr_flags & IFF_UP)) {
+        rc = -ENETDOWN;
+    } else if (enable && (request.ifr_flags & IFF_PROMISC)) {
+
+    } else {
+        if (enable) request.ifr_flags |= IFF_PROMISC;
+        else request.ifr_flags &= ~IFF_PROMISC;
+        if (ioctl(fd, SIOCSIFFLAGS, &request)) rc = -errno;
+        else p->promisc_owned[dir] = enable;
+    }
+    close(fd);
+    return rc;
+}
+
 int ne_pair_open(struct ne_pair *p, struct app_config *cfg)
 {
     if (!p || !cfg || cfg->local_count != 1 || cfg->wan_count != 1 ||
@@ -239,7 +269,11 @@ int ne_pair_open(struct ne_pair *p, struct app_config *cfg)
     for (int dir = 0; dir < 2; dir++) {
         const char *name = dir ? cfg->wans[0].ifname : cfg->locals[0].ifname;
         int n = queue_count(name);
-        if (n < (int)CORE_TX_WORKERS || n > MAX_QUEUES) return -ENOSPC;
+        if (n < (int)CORE_TX_WORKERS || n > MAX_QUEUES) {
+            fprintf(stderr, "[INTERFACE] %s needs at least %u queues (has %d)\n",
+                    name, CORE_TX_WORKERS, n);
+            return -ENOSPC;
+        }
         if (dir) cfg->wans[0].queue_count = n;
         else cfg->locals[0].queue_count = n;
     }
@@ -281,6 +315,9 @@ int ne_pair_open(struct ne_pair *p, struct app_config *cfg)
         rc = ne_fill_slot(p, dir, 0);
         if (rc < 0) goto fail;
     }
+    rc = interface_promisc(p, NE_DIR_LOCAL, 1);
+    if (!rc) rc = interface_promisc(p, NE_DIR_WAN, 1);
+    if (rc) goto fail;
     rc = core_xdp_attach(p);
     if (rc) goto fail;
     p->local_live[0] = p->wan_live[0] = 1;
@@ -295,7 +332,9 @@ void ne_pair_close(struct ne_pair *p, const struct app_config *cfg)
     (void)cfg;
     if (!p || !p->config) return;
     core_xdp_detach(p);
-    /* Shared UMEM socket must be deleted last. */
+    interface_promisc(p, NE_DIR_LOCAL, 0);
+    interface_promisc(p, NE_DIR_WAN, 0);
+
     for (int pass = 0; pass < 2; pass++)
         for (int dir = 0; dir < 2; dir++) {
             int count;

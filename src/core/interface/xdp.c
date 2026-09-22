@@ -1,4 +1,4 @@
-#include "../../../inc/core/interface/xdp.h"
+#include "../../../inc/interface/xdp.h"
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include <linux/if_link.h>

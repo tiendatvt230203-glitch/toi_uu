@@ -1,7 +1,7 @@
 #ifndef DB_RUNTIME_H
 #define DB_RUNTIME_H
 
-#include "core/core_types.h"
+#include "core_types.h"
 
 int ne_profile_id_exists(int profile_id);
 int load_active_profile_config(struct app_config *out_cfg, int profile_id);

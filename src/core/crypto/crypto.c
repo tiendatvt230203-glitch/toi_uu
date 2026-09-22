@@ -1,13 +1,12 @@
-#include "../../../inc/core/crypto/crypto.h"
+#include "../../../inc/crypto/crypto.h"
 
-#include "../../../inc/core/core_types.h"
-#include "../../../inc/pqc/scrypt.h"
+#include "../../../inc/core_types.h"
+#include "scrypt.h"
 
 #include <errno.h>
 #include <pthread.h>
 #include <string.h>
 #include <stdlib.h>
-#include <time.h>
 
 static pthread_once_t g_cipher_once = PTHREAD_ONCE_INIT;
 static int g_cipher_ready;
@@ -137,7 +136,7 @@ int core_l2_pqc_fragment(const uint8_t *pkt, uint32_t len,
                           struct core_packet_batch *out)
 {
     if (!pkt || !out || !key || len < 14 || len > ETH_FRAME_MAX ||
-        core_id >= CORE_CRYPTO_WORKERS || pkt[12] != 8 || pkt[13] != 0)
+        core_id >= CORE_TX_WORKERS || pkt[12] != 8 || pkt[13] != 0)
         return -EINVAL;
     out->count = 0;
     if (len + 30u <= NE_FRAME_DATA_MAX) {
@@ -189,7 +188,7 @@ int core_l2_pqc_reassemble(uint8_t *pkt, uint32_t *len, uint32_t capacity,
 {
     if (!pkt || !len || *len < 16) return -EINVAL;
     uint8_t policy = pkt[14], core = pkt[15];
-    if ((core & CORE_JUMBO_CORE_MASK) >= CORE_CRYPTO_WORKERS) return -EINVAL;
+    if ((core & CORE_JUMBO_CORE_MASK) >= CORE_TX_WORKERS) return -EINVAL;
     int rc = core_l2_pqc_decrypt(pkt, len, capacity, wire_type, key);
     if (rc || !(core & CORE_JUMBO_FLAG)) return rc;
     if (*len < 14u + CORE_JUMBO_SHIM_SIZE) return -EBADMSG;
@@ -206,22 +205,18 @@ int core_l2_pqc_reassemble(uint8_t *pkt, uint32_t *len, uint32_t capacity,
         *len != 14u + CORE_JUMBO_SHIM_SIZE + bytes) return -EBADMSG;
     if (!g_jumbo_slots) g_jumbo_slots = calloc(CORE_JUMBO_SLOTS, sizeof(*g_jumbo_slots));
     if (!g_jumbo_slots) return -ENOMEM;
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return -errno;
-    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
     uint32_t hash = id ^ ((uint32_t)policy << 24) ^ wire_type;
     for (unsigned i = 6; i < 12; i++) hash = hash * 33u ^ pkt[i];
     struct core_fragment_slot *slot = NULL, *empty = NULL;
     for (unsigned i = 0; i < CORE_JUMBO_SLOTS; i++) {
         struct core_fragment_slot *s = &g_jumbo_slots[(hash + i) % CORE_JUMBO_SLOTS];
-        if (s->seen && now - s->seen_ns >= CORE_JUMBO_TIMEOUT_NS)
-            memset(s, 0, sizeof(*s));
         if (!s->seen) { if (!empty) empty = s; continue; }
         if (s->id == id && s->policy_id == policy && s->wire_type == wire_type &&
             s->core_id == (core & CORE_JUMBO_CORE_MASK) &&
             !memcmp(s->source_mac, pkt + 6, 6)) { slot = s; break; }
     }
     if (!slot) {
+        if (index != 0 || offset != 0) return -EBADMSG;
         slot = empty;
         if (!slot) return -ENOSPC;
         memset(slot, 0, sizeof(*slot));
@@ -230,15 +225,15 @@ int core_l2_pqc_reassemble(uint8_t *pkt, uint32_t *len, uint32_t capacity,
         slot->total_len = total; slot->count = count;
         memcpy(slot->source_mac, pkt + 6, 6);
     }
-    if (slot->total_len != total || slot->count != count) return -EBADMSG;
-    if (slot->seen & (1u << index)) return -EALREADY;
-    for (unsigned i = 0; i < count; i++)
-        if ((slot->seen & (1u << i)) && offset < slot->offset[i] + slot->length[i] &&
-            slot->offset[i] < offset + bytes) return -EBADMSG;
+    if (slot->total_len != total || slot->count != count ||
+        slot->seen != (1u << index) - 1u ||
+        offset != (index ? slot->offset[index - 1] + slot->length[index - 1] : 0)) {
+        memset(slot, 0, sizeof(*slot));
+        return -EBADMSG;
+    }
     memcpy(slot->data + offset, shim + CORE_JUMBO_SHIM_SIZE, bytes);
     slot->offset[index] = offset; slot->length[index] = bytes;
     slot->seen |= 1u << index;
-    slot->seen_ns = now;
     if (slot->seen != (1u << count) - 1u) return 1;
     uint32_t covered = 0;
     for (unsigned i = 0; i < count; i++) covered += slot->length[i];

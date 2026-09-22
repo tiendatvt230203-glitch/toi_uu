@@ -23,10 +23,10 @@ struct ne_vault_cfg {
     char k1[256];
     char k2[256];
     char k3[256];
-    int debug; /* 0/1: dump POSTGRES_* from Vault to stderr */
+    int debug;
 };
 
-/* Effective debug flag after reading .env (compile default + NE_VAULT_DEBUG). */
+
 static int g_ne_vault_debug = NE_VAULT_DEBUG_LOG;
 
 static void strip_env_quotes(char *val)
@@ -52,7 +52,7 @@ static int ne_vault_key_allowed(const char *key)
         "UNSEAL_KEY_1",
         "UNSEAL_KEY_2",
         "UNSEAL_KEY_3",
-        "NE_VAULT_DEBUG", /* 0|1 dump DB secrets from Vault */
+        "NE_VAULT_DEBUG",
         NULL
     };
 
@@ -187,7 +187,7 @@ static int ne_vault_load_cfg(struct ne_vault_cfg *cfg)
     if (cfg->token[0])
         setenv("VAULT_TOKEN", cfg->token, 1);
 
-    fprintf(stderr,
+    if (g_ne_vault_debug) fprintf(stderr,
             "[VAULT] config from " NE_ENV_FILE
             " (addr=%s unseal_keys=%d token=%s debug=%d)\n",
             cfg->addr[0] ? cfg->addr : "-",
@@ -343,7 +343,7 @@ static int ne_vault_http_status(const char *response)
 
     if (!response)
         return -1;
-    /* "HTTP/1.x NNN ..." */
+
     p = strstr(response, "HTTP/");
     if (!p)
         return -1;
@@ -434,7 +434,7 @@ static void ne_vault_log_loaded_secrets(void)
             "  \"POSTGRES_PORT\": \"%s\",\n"
             "  \"POSTGRES_USER\": \"%s\",\n",
             (db && db[0]) ? db : "",
-            (pass && pass[0]) ? pass : "",
+            (pass && pass[0]) ? "[REDACTED]" : "",
             (port && port[0]) ? port : "",
             (user && user[0]) ? user : "");
     fflush(stderr);
@@ -580,7 +580,7 @@ int ne_vault_unseal_and_login(void)
         return -1;
     }
 
-    fprintf(stderr, "[VAULT] unseal via HTTP addr=%s (timeout=%ds)\n",
+    if (g_ne_vault_debug) fprintf(stderr, "[VAULT] unseal via HTTP addr=%s (timeout=%ds)\n",
             cfg.addr, NE_VAULT_HTTP_TIMEOUT_SEC);
 
     if (ne_vault_http_request(&cfg, "GET", "/v1/sys/seal-status", NULL,
@@ -590,7 +590,7 @@ int ne_vault_unseal_and_login(void)
     }
 
     if (ne_vault_json_bool_false(response, "sealed")) {
-        fprintf(stderr, "[VAULT] unseal ok (already unsealed)\n");
+        if (g_ne_vault_debug) fprintf(stderr, "[VAULT] unseal ok (already unsealed)\n");
         return 0;
     }
 
@@ -619,7 +619,7 @@ int ne_vault_unseal_and_login(void)
         return -1;
     }
 
-    fprintf(stderr, "[VAULT] unseal ok\n");
+    if (g_ne_vault_debug) fprintf(stderr, "[VAULT] unseal ok\n");
     return 0;
 }
 
@@ -639,7 +639,7 @@ int ne_vault_load_secrets(void)
         return -1;
     }
 
-    fprintf(stderr, "[VAULT] HTTP kv get " NE_VAULT_SECRET_PATH
+    if (g_ne_vault_debug) fprintf(stderr, "[VAULT] HTTP kv get " NE_VAULT_SECRET_PATH
             " (timeout=%ds)\n", NE_VAULT_HTTP_TIMEOUT_SEC);
 
     if (ne_vault_kv_get_and_apply(&cfg) != 0)
@@ -649,6 +649,6 @@ int ne_vault_load_secrets(void)
         return -1;
 
     ne_vault_log_loaded_secrets();
-    fprintf(stderr, "[VAULT] POSTGRES_* loaded from " NE_VAULT_SECRET_PATH "\n");
+    if (g_ne_vault_debug) fprintf(stderr, "[VAULT] POSTGRES_* loaded from " NE_VAULT_SECRET_PATH "\n");
     return 0;
 }

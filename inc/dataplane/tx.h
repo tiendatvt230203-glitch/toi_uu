@@ -2,7 +2,7 @@
 #define CORE_TX_H
 #include <stdint.h>
 #include "../core_types.h"
-/* Return 1 on match, 0 on drop. Packet is plaintext IPv4. */
+
 int core_tx_match_out(const struct app_config *cfg, const uint8_t *pkt,
                       uint32_t len, const struct crypto_policy **policy_out);
 int core_tx_match_in(const struct app_config *cfg, const uint8_t *pkt,

@@ -1,8 +1,8 @@
-#include "../../../inc/core/dataplane/tx.h"
+#include "../../../inc/dataplane/tx.h"
 #include <netinet/in.h>
 #include <string.h>
 
-/* Match policy on an untagged, plaintext IPv4 Ethernet frame. */
+
 static int read_flow(const uint8_t *pkt, uint32_t len, uint32_t *sip,
                      uint32_t *dip, uint16_t *sport, uint16_t *dport,
                      uint8_t *proto)
@@ -35,8 +35,8 @@ static int port_ok(int from, int to, uint16_t port)
     return from < 0 || to < 0 || ((int)port >= from && (int)port <= to);
 }
 
-/* Adjacent DB rows with one db_id are one UI policy. Preserve the old
- * positive OR and negated AND matching of that group. */
+
+
 static int group_ok(const struct app_config *cfg, int first, int *next,
                     uint32_t sip, uint32_t dip, uint16_t sport,
                     uint16_t dport, uint8_t proto)

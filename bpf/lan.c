@@ -3,7 +3,7 @@
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
-#include "../inc/core/core_types.h"
+#include "../inc/core_types.h"
 
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);

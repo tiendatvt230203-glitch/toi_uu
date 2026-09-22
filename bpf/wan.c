@@ -3,7 +3,7 @@
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
-#include "../inc/core/core_types.h"
+#include "../inc/core_types.h"
 
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
@@ -24,11 +24,7 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
     __u16 proto = eth->h_proto;
 
-    /* CFM failover — luôn vào kernel stack cho AF_PACKET raw socket. */
-    if (proto == bpf_htons(ETH_P_CFM))
-        return XDP_PASS;
 
-    /* ARP is temporarily owned by the kernel, not this dataplane. */
     if (proto == bpf_htons(ETH_P_ARP) ||
         proto == bpf_htons(ETH_P_NE_ARP_ENC))
         return XDP_PASS;

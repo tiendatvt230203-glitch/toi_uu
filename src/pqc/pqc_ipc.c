@@ -220,26 +220,26 @@ void sig_pqc_cleanup_ipc(void) {
 void sig_pqc_handle_gen_identity(void) {
     uint8_t dsa_pub[3000], dsa_priv[5000];
     int pub_sz, priv_sz;
-    
+
     trf_pqc_init_global();
 
     printf("[PQC-GI] Generating Manual Identity (Vault Only)...\n");
     if (trf_dsa_generate_keys(dsa_pub, &pub_sz, dsa_priv, &priv_sz) == TRF_PQC_OK) {
         char *b64_priv = malloc(priv_sz * 2);
         char *b64_pub = malloc(pub_sz * 2);
-        
+
         trf_base64_encode(dsa_priv, priv_sz, b64_priv);
         trf_base64_encode(dsa_pub, pub_sz, b64_pub);
 
-        // Calculate 8-char fingerprint (SHA256 of public key binary)
+
         uint8_t hash[64];
         trf_calculate_digest(DIGEST_TYPE_SHA256, dsa_pub, pub_sz, hash);
         char fingerprint[16];
         for (int i = 0; i < 4; i++) sprintf(fingerprint + i * 2, "%02x", hash[i]);
 
-        // printf("[PQC-GI] Success! Generated Fingerprint: %s\n", fingerprint);
 
-        // Export directly to HashiCorp Vault (Vault is the only persistent storage)
+
+
         char key_filename[64];
         snprintf(key_filename, sizeof(key_filename), "%s.key", fingerprint);
         sig_pqc_init_vault();
@@ -250,7 +250,7 @@ void sig_pqc_handle_gen_identity(void) {
         } else {
             fprintf(stderr, "[PQC-GI] WARNING: Failed to export identity [%s] to HashiCorp Vault.\n", fingerprint);
         }
-        
+
         free(b64_priv);
         free(b64_pub);
     } else {

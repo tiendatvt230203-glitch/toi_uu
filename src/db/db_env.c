@@ -18,9 +18,6 @@ int load_ne_env(void) {
         return -1;
     }
 
-    fprintf(stderr,
-            "[ENV] " NE_ENV_FILE " holds VAULT config only; "
-            "POSTGRES_* come from Vault " NE_VAULT_SECRET_PATH "\n");
 
     if (ne_vault_unseal_and_login() != 0) {
         fprintf(stderr,
@@ -38,10 +35,7 @@ int load_ne_env(void) {
     }
 
     ne_sync_pgpassword();
-    fprintf(stderr,
-            "[ENV] POSTGRES_* ready (from Vault " NE_VAULT_SECRET_PATH
-            "; NE_VAULT_DEBUG=%s)\n",
-            getenv("NE_VAULT_DEBUG") ? getenv("NE_VAULT_DEBUG") : "0");
+    fprintf(stderr, "[VAULT] OK\n");
     return 0;
 }
 

@@ -1,9 +1,9 @@
-#include "../../../inc/core/dataplane/wan.h"
-#include "../../../inc/core/dataplane/bypass.h"
-#include "../../../inc/core/dataplane/ospf.h"
-#include "../../../inc/core/dataplane/ping.h"
-#include "../../../inc/core/dataplane/tcp.h"
-#include "../../../inc/core/dataplane/udp.h"
+#include "../../../inc/dataplane/wan.h"
+#include "../../../inc/dataplane/bypass.h"
+#include "../../../inc/dataplane/ospf.h"
+#include "../../../inc/dataplane/ping.h"
+#include "../../../inc/dataplane/tcp.h"
+#include "../../../inc/dataplane/udp.h"
 
 #include <errno.h>
 

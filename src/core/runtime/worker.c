@@ -1,22 +1,20 @@
-#include "../../../inc/core/runtime/worker.h"
-#include "../../../inc/core/interface/interface.h"
-#include "../../../inc/core/dataplane/bypass.h"
-#include "../../../inc/core/dataplane/tx.h"
-#include "../../../inc/core/dataplane/wan.h"
+#include "../../../inc/runtime/worker.h"
+#include "../../../inc/interface/interface.h"
+#include "../../../inc/dataplane/bypass.h"
+#include "../../../inc/dataplane/tx.h"
+#include "../../../inc/dataplane/wan.h"
 
 #include <errno.h>
 #include <netinet/in.h>
 #include <string.h>
 #include <time.h>
 #include <sched.h>
-#include "../../../inc/core/dataplane/lan.h"
-#include "../../../inc/core/crypto/crypto.h"
+#include "../../../inc/dataplane/lan.h"
+#include "../../../inc/crypto/crypto.h"
 
 static struct core_flow_route
     g_flow_routes[CORE_FLOW_ROUTE_SETS][CORE_FLOW_ROUTE_WAYS];
-static uint64_t g_worker_load[CORE_CRYPTO_WORKERS];
-static uint64_t g_tx_load[CORE_TX_WORKERS];
-static unsigned g_worker_cursor, g_tx_cursor;
+static uint64_t g_worker_load[CORE_TX_WORKERS];
 static pthread_mutex_t g_flow_route_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int core_worker_pin_cpu(int cpu_id)
@@ -28,7 +26,7 @@ int core_worker_pin_cpu(int cpu_id)
     return rc ? -rc : 0;
 }
 
-static int select_flow_core(const uint8_t *pkt, uint32_t len, int tx_mode, int worker_hint)
+static int select_flow_core(const uint8_t *pkt, uint32_t len, int worker_hint)
 {
     uint32_t src_ip, dst_ip, hash, tmp_ip;
     uint16_t src_port = 0, dst_port = 0, tmp_port;
@@ -55,8 +53,13 @@ static int select_flow_core(const uint8_t *pkt, uint32_t len, int tx_mode, int w
         src_port = ((uint16_t)pkt[l4_off] << 8) | pkt[l4_off + 1];
         dst_port = ((uint16_t)pkt[l4_off + 2] << 8) | pkt[l4_off + 3];
     }
-    if ((proto == IPPROTO_TCP || proto == IPPROTO_UDP) &&
-        (src_ip > dst_ip || (src_ip == dst_ip && src_port > dst_port))) {
+    if (proto == IPPROTO_ICMP) {
+        l4_off = 14u + ihl;
+        if (len < l4_off + 8u) return -EINVAL;
+        if (pkt[l4_off] == 0 || pkt[l4_off] == 8)
+            src_port = dst_port = ((uint16_t)pkt[l4_off+4] << 8) | pkt[l4_off+5];
+    }
+    if (src_ip > dst_ip || (src_ip == dst_ip && src_port > dst_port)) {
         tmp_ip = src_ip;
         src_ip = dst_ip;
         dst_ip = tmp_ip;
@@ -73,18 +76,16 @@ static int select_flow_core(const uint8_t *pkt, uint32_t len, int tx_mode, int w
     hash *= 0xc2b2ae35u;
     hash ^= hash >> 16;
 
-    if (tx_mode == 1) return hash % CORE_TX_WORKERS;
-    if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
-        return hash % (tx_mode ? CORE_TX_WORKERS : CORE_CRYPTO_WORKERS);
     set = g_flow_routes[hash & (CORE_FLOW_ROUTE_SETS - 1u)];
-    /* Entries are immutable until all workers have stopped. */
+
     for (unsigned way = 0; way < CORE_FLOW_ROUTE_WAYS; way++) {
         struct core_flow_route *flow = &set[way];
         if (atomic_load_explicit(&flow->valid, memory_order_acquire) &&
             flow->ip_a == src_ip && flow->ip_b == dst_ip &&
             flow->port_a == src_port && flow->port_b == dst_port &&
             flow->protocol == proto)
-            return tx_mode ? flow->tx_slot : flow->worker_idx;
+            return worker_hint >= 0 && worker_hint != flow->worker_idx
+                ? -EXDEV : flow->worker_idx;
     }
     pthread_mutex_lock(&g_flow_route_lock);
     for (unsigned way = 0; way < CORE_FLOW_ROUTE_WAYS; way++) {
@@ -97,13 +98,14 @@ static int select_flow_core(const uint8_t *pkt, uint32_t len, int tx_mode, int w
             flow->port_a != src_port || flow->port_b != dst_port ||
             flow->protocol != proto)
             continue;
-        int chosen = tx_mode ? flow->tx_slot : flow->worker_idx;
+        int chosen = worker_hint >= 0 && worker_hint != flow->worker_idx
+            ? -EXDEV : flow->worker_idx;
         pthread_mutex_unlock(&g_flow_route_lock);
         return chosen;
     }
     if (empty < 0) {
         pthread_mutex_unlock(&g_flow_route_lock);
-        return hash % (tx_mode ? CORE_TX_WORKERS : CORE_CRYPTO_WORKERS);
+        return -ENOSPC;
     }
     struct core_flow_route *flow = &set[empty];
     flow->ip_a = src_ip;
@@ -111,45 +113,34 @@ static int select_flow_core(const uint8_t *pkt, uint32_t len, int tx_mode, int w
     flow->port_a = src_port;
     flow->port_b = dst_port;
     flow->protocol = proto;
-    unsigned wc = g_worker_cursor % CORE_CRYPTO_WORKERS;
-    if (worker_hint < 0) g_worker_cursor++;
-    unsigned tc = g_tx_cursor++ % CORE_TX_WORKERS;
-    unsigned best_w = wc, best_t = tc;
-    for (unsigned i = 1; i < CORE_CRYPTO_WORKERS; i++) {
-        unsigned w = (wc + i) % CORE_CRYPTO_WORKERS;
-        if (g_worker_load[w] < g_worker_load[best_w]) best_w = w;
-    }
-    for (unsigned i = 1; i < CORE_TX_WORKERS; i++) {
-        unsigned t = (tc + i) % CORE_TX_WORKERS;
-        if (g_tx_load[t] < g_tx_load[best_t]) best_t = t;
-    }
-    flow->worker_idx = worker_hint >= 0 ? (unsigned)worker_hint : best_w;
-    flow->tx_slot = best_t;
+    unsigned chosen = 0;
+    for (unsigned i = 1; i < CORE_TX_WORKERS; i++)
+        if (g_worker_load[i] < g_worker_load[chosen]) chosen = i;
+    flow->worker_idx = worker_hint >= 0 ? (unsigned)worker_hint : chosen;
     g_worker_load[flow->worker_idx]++;
-    g_tx_load[flow->tx_slot]++;
     atomic_store_explicit(&flow->valid, 1, memory_order_release);
-    int chosen = tx_mode ? flow->tx_slot : flow->worker_idx;
+    int result = flow->worker_idx;
     pthread_mutex_unlock(&g_flow_route_lock);
-    return chosen;
+    return result;
 }
 
 int core_worker_select_encrypt_core(const uint8_t *pkt, uint32_t len)
 {
-    return select_flow_core(pkt, len, 0, -1);
+    return select_flow_core(pkt, len, -1);
 }
 
 int core_worker_select_tx_core(const uint8_t *pkt, uint32_t len)
 {
-    return select_flow_core(pkt, len, 1, -1);
+    return select_flow_core(pkt, len, -1);
 }
 
 int core_worker_select_decrypt_core(const uint8_t *pkt, uint32_t len)
 {
     if (!pkt || len < 16)
         return -EINVAL;
-    /* Wire core ID is a worker index, not a physical CPU number. */
+
     uint8_t id = pkt[15] & CORE_JUMBO_CORE_MASK;
-    if (id >= CORE_CRYPTO_WORKERS)
+    if (id >= CORE_TX_WORKERS)
         return -EINVAL;
     return id;
 }
@@ -157,46 +148,22 @@ int core_worker_select_decrypt_core(const uint8_t *pkt, uint32_t len)
 
 int core_worker_rx_submit(struct core_runtime *rt, const struct ne_packet *pkt)
 {
-    uint8_t data[ETH_FRAME_MAX], wan_idx;
-    const struct crypto_policy *policy = NULL;
-    struct ne_packet job = *pkt;
+    uint8_t data[ETH_FRAME_MAX];
     int len = ne_packet_copy(&rt->pair, pkt, data, sizeof(data));
     if (len < 0) return len;
-
+    int worker;
     if (pkt->dir == NE_DIR_LOCAL) {
+        const struct crypto_policy *policy = NULL;
         if (core_tx_match_out(&rt->config, data, len, &policy) <= 0)
             return -EACCES;
-        if (policy->action == POLICY_ACTION_BYPASS) {
-            int rc = core_bypass_handle_lan_wan(&rt->config, data, len, &wan_idx);
-            if (rc) return rc;
-            int tx = core_worker_select_tx_core(data, len);
-            if (tx < 0) return tx;
-            job.dir = NE_DIR_WAN;
-            job.wan_idx = wan_idx;
-            job.tx_slot = tx;
-            return ne_ring_try_push(&rt->to_wan_tx[wan_idx][tx], &job);
-        }
-        int worker = core_worker_select_encrypt_core(data, len);
-        if (worker < 0) return worker;
-        job.tx_slot = select_flow_core(data, len, 2, worker);
-        return ne_ring_try_push(&rt->local_to_crypto[worker], &job);
-    }
-
-    if (pkt->dir != NE_DIR_WAN) return -EINVAL;
-    if (len >= 14 && data[12] == 0x08 && data[13] == 0x00) {
-        uint32_t plain_len = len;
-        int rc = core_bypass_handle_wan_lan(&rt->config, data, &plain_len);
-        if (rc) return rc;
-        int tx = core_worker_select_tx_core(data, plain_len);
-        if (tx < 0) return tx;
-        job.dir = NE_DIR_LOCAL;
-        job.local_idx = 0;
-        job.tx_slot = tx;
-        return ne_ring_try_push(&rt->to_lan_tx[0][tx], &job);
-    }
-    int worker = core_worker_select_decrypt_core(data, len);
+        worker = core_worker_select_encrypt_core(data, len);
+    } else if (pkt->dir == NE_DIR_WAN) {
+        worker = len >= 14 && data[12] == 8 && data[13] == 0
+            ? core_worker_select_tx_core(data, len)
+            : core_worker_select_decrypt_core(data, len);
+    } else return -EINVAL;
     if (worker < 0) return worker;
-    return ne_ring_try_push(&rt->wan_to_crypto[worker], &job);
+    return ne_ring_try_push(&rt->rx_to_tx[pkt->dir][worker], pkt);
 }
 
 int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
@@ -207,19 +174,30 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
     struct ne_packet output[NE_PACKET_MAX_SEGMENTS];
     struct ne_ring *ring;
     unsigned count = 0;
-    int rc, tx;
-    if (worker_idx < 0 || worker_idx >= (int)CORE_CRYPTO_WORKERS)
+    int rc, tx = worker_idx;
+    if (worker_idx < 0 || worker_idx >= (int)CORE_TX_WORKERS)
         return -EINVAL;
     rc = ne_packet_copy(&rt->pair, pkt, data, sizeof(data));
     if (rc < 0) return rc;
     uint32_t len = rc;
 
     if (pkt->dir == NE_DIR_LOCAL) {
+        const struct crypto_policy *policy = NULL;
+        if (core_tx_match_out(&rt->config, data, len, &policy) <= 0)
+            return -EACCES;
+        if (policy->action == POLICY_ACTION_BYPASS) {
+            uint8_t wan_idx;
+            rc = core_bypass_handle_lan_wan(&rt->config, data, len, &wan_idx);
+            if (rc) return rc;
+            struct ne_packet job = *pkt;
+            job.dir = NE_DIR_WAN;
+            job.wan_idx = wan_idx;
+            job.tx_slot = worker_idx;
+            return ne_ring_try_push(&rt->tx_pending[NE_DIR_WAN][worker_idx], &job);
+        }
         rc = core_lan_process(&rt->config, data, len, worker_idx, &batch);
         if (rc) return rc;
-        tx = pkt->tx_slot;
-        if (tx >= (int)CORE_TX_WORKERS) return -EINVAL;
-        ring = &rt->to_wan_tx[0][tx];
+        ring = &rt->tx_pending[NE_DIR_WAN][tx];
         for (; count < batch.count; count++) {
             rc = ne_packet_store(&rt->pair, batch.data[count],
                                   batch.len[count], &output[count]);
@@ -231,19 +209,27 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
             output[count].jumbo_fragment_count = batch.count;
         }
     } else {
-        if (pkt->dir != NE_DIR_WAN ||
-            core_worker_select_decrypt_core(data, len) != worker_idx)
-            return -EINVAL;
+        if (pkt->dir != NE_DIR_WAN) return -EINVAL;
+        if (len >= 14 && data[12] == 8 && data[13] == 0) {
+            rc = core_bypass_handle_wan_lan(&rt->config, data, &len);
+            if (rc) return rc;
+            struct ne_packet job = *pkt;
+            job.dir = NE_DIR_LOCAL;
+            job.local_idx = 0;
+            job.tx_slot = worker_idx;
+            return ne_ring_try_push(&rt->tx_pending[NE_DIR_LOCAL][worker_idx], &job);
+        }
+        if (core_worker_select_decrypt_core(data, len) != worker_idx) return -EINVAL;
         rc = core_wan_process(&rt->config, data, &len, sizeof(data));
         if (rc == 1) {
-            /* Reassembly owns a copy, not the RX UMEM frame. */
+
             ne_packet_free(&rt->pair, pkt);
             return 0;
         }
         if (rc) return rc;
-        tx = select_flow_core(data, len, 2, worker_idx);
-        if (tx < 0) return tx;
-        ring = &rt->to_lan_tx[0][tx];
+
+        (void)select_flow_core(data, len, worker_idx);
+        ring = &rt->tx_pending[NE_DIR_LOCAL][tx];
         rc = ne_packet_store(&rt->pair, data, len, &output[0]);
         if (rc) return rc;
         count = 1;
@@ -252,7 +238,7 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
         output[0].tx_slot = tx;
     }
 
-    /* Publish a complete jumbo group at once; no partial enqueue. */
+
     pthread_spin_lock(&ring->push_lock);
     uint32_t head = __atomic_load_n(&ring->head, __ATOMIC_RELAXED);
     uint32_t tail = __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE);
@@ -280,8 +266,7 @@ int core_worker_tx_step(struct core_runtime *rt, int tx_slot)
         return -EINVAL;
     int total = 0;
     for (int dir = NE_DIR_LOCAL; dir <= NE_DIR_WAN; dir++) {
-        struct ne_ring *ring = dir == NE_DIR_LOCAL
-            ? &rt->to_lan_tx[0][tx_slot] : &rt->to_wan_tx[0][tx_slot];
+        struct ne_ring *ring = &rt->tx_pending[dir][tx_slot];
         int rc = ne_cq_drain_slot(&rt->pair, dir, tx_slot);
         if (rc < 0) return rc;
         rc = ne_tx_drain_all(&rt->pair, dir, &ring, 1, 0, tx_slot);
@@ -298,25 +283,31 @@ static void *core_worker_run(void *arg)
     while (!atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
         if (worker->role == CORE_WORKER_TX) {
             core_worker_tx_step(rt, worker->slot);
-        } else if (worker->role == CORE_WORKER_CRYPTO) {
             for (int dir = NE_DIR_LOCAL; dir <= NE_DIR_WAN; dir++) {
-                struct ne_ring *ring = dir == NE_DIR_LOCAL
-                    ? &rt->local_to_crypto[worker->slot]
-                    : &rt->wan_to_crypto[worker->slot];
+                struct ne_ring *ring = &rt->rx_to_tx[dir][worker->slot];
                 struct ne_packet packets[NE_BATCH_SIZE];
                 unsigned count = ne_ring_try_pop_batch(ring, packets, NE_BATCH_SIZE);
-                for (unsigned i = 0; i < count; i++)
-                    if (core_worker_crypto_step(rt, &packets[i], worker->slot))
+                for (unsigned i = 0; i < count; i++) {
+                    pthread_rwlock_rdlock(&rt->config_lock);
+                    int rc = core_worker_crypto_step(rt, &packets[i], worker->slot);
+                    pthread_rwlock_unlock(&rt->config_lock);
+                    if (rc)
                         ne_packet_free(&rt->pair, &packets[i]);
+                }
             }
+            core_worker_tx_step(rt, worker->slot);
         } else {
             enum ne_packet_dir dir = worker->role == CORE_WORKER_LAN_RX
                 ? NE_DIR_LOCAL : NE_DIR_WAN;
             struct ne_packet packets[NE_BATCH_SIZE];
             int count = ne_recv_slot(&rt->pair, dir, worker->slot, packets, NE_BATCH_SIZE);
-            for (int i = 0; i < count; i++)
-                if (core_worker_rx_submit(rt, &packets[i]))
+            for (int i = 0; i < count; i++) {
+                pthread_rwlock_rdlock(&rt->config_lock);
+                int rc = core_worker_rx_submit(rt, &packets[i]);
+                pthread_rwlock_unlock(&rt->config_lock);
+                if (rc)
                     ne_packet_free(&rt->pair, &packets[i]);
+            }
             ne_fill_slot(&rt->pair, dir, worker->slot);
         }
     }
@@ -334,13 +325,11 @@ void core_worker_stop_all(struct core_runtime *rt)
         }
     }
     rt->worker_count = 0;
-    /* Free only queued frames; submitted TX frames belong to CQ/UMEM. */
-    for (unsigned i = 0; i < CORE_CRYPTO_WORKERS + CORE_TX_WORKERS; i++) {
+
+    for (unsigned i = 0; i < 2u * CORE_TX_WORKERS; i++) {
         for (int dir = NE_DIR_LOCAL; dir <= NE_DIR_WAN; dir++) {
-            struct ne_ring *ring = i < CORE_CRYPTO_WORKERS
-                ? (dir == NE_DIR_LOCAL ? &rt->local_to_crypto[i] : &rt->wan_to_crypto[i])
-                : (dir == NE_DIR_LOCAL ? &rt->to_lan_tx[0][i-CORE_CRYPTO_WORKERS]
-                                       : &rt->to_wan_tx[0][i-CORE_CRYPTO_WORKERS]);
+            struct ne_ring *ring = i < CORE_TX_WORKERS
+                ? &rt->rx_to_tx[dir][i] : &rt->tx_pending[dir][i-CORE_TX_WORKERS];
             if (!ring->buf) continue;
             struct ne_packet pkt;
             while (ne_ring_try_pop(ring, &pkt) > 0)
@@ -358,25 +347,19 @@ int core_worker_start_all(struct core_runtime *rt)
         rt->config.wan_count != 1) return -ENODEV;
     int rc = 0;
     atomic_store(&rt->stop_requested, 0);
-    for (unsigned i = 0; i < CORE_CRYPTO_WORKERS + CORE_TX_WORKERS; i++) {
+    for (unsigned i = 0; i < 2u * CORE_TX_WORKERS; i++) {
         for (int dir = NE_DIR_LOCAL; dir <= NE_DIR_WAN; dir++) {
-            struct ne_ring *ring = i < CORE_CRYPTO_WORKERS
-                ? (dir == NE_DIR_LOCAL ? &rt->local_to_crypto[i] : &rt->wan_to_crypto[i])
-                : (dir == NE_DIR_LOCAL ? &rt->to_lan_tx[0][i-CORE_CRYPTO_WORKERS]
-                                       : &rt->to_wan_tx[0][i-CORE_CRYPTO_WORKERS]);
+            struct ne_ring *ring = i < CORE_TX_WORKERS
+                ? &rt->rx_to_tx[dir][i] : &rt->tx_pending[dir][i-CORE_TX_WORKERS];
             rc = ne_ring_init(ring, CORE_RING_CAPACITY, 0);
             if (rc) goto fail;
         }
     }
     memset(g_flow_routes, 0, sizeof(g_flow_routes));
     memset(g_worker_load, 0, sizeof(g_worker_load));
-    memset(g_tx_load, 0, sizeof(g_tx_load));
-    g_worker_cursor = g_tx_cursor = 0;
     for (int role = CORE_WORKER_TX; role >= CORE_WORKER_LAN_RX; role--) {
-        unsigned count = role == CORE_WORKER_TX ? CORE_TX_WORKERS :
-                         role == CORE_WORKER_CRYPTO ? CORE_CRYPTO_WORKERS : 1;
+        unsigned count = role == CORE_WORKER_TX ? CORE_TX_WORKERS : 1;
         const uint8_t *cpus = role == CORE_WORKER_TX ? CORE_CPU_TX :
-                             role == CORE_WORKER_CRYPTO ? CORE_CPU_CRYPTO :
                              role == CORE_WORKER_WAN_RX ? CORE_CPU_RX_WAN : CORE_CPU_RX_LAN;
         for (unsigned slot = 0; slot < count; slot++) {
             struct core_worker *w = &rt->workers[rt->worker_count];

@@ -16,7 +16,7 @@ uint32_t ne_ring_count(const struct ne_ring *r);
 int ne_pair_open(struct ne_pair *p, struct app_config *cfg);
 void ne_pair_close(struct ne_pair *p, const struct app_config *cfg);
 
-/* AF_XDP: FILL supplies frames for RX; CQ returns completed TX frames. */
+
 int ne_fill_slot(struct ne_pair *p, enum ne_packet_dir dir, int rx_slot);
 int ne_recv_slot(struct ne_pair *p, enum ne_packet_dir dir, int rx_slot,
                  struct ne_packet *out, uint32_t max);

@@ -36,8 +36,8 @@ struct pqc_policy_key {
     uint8_t bytes[PQC_POLICY_KEY_SIZE];
 };
 
-/* NE calls this for initial handshake and again when its own key timer
- * expires. PQC returns a new key; NE decides when to install it. */
+
+
 int sig_pqc_handshake_policy(const struct pqc_policy_input *input,
                              struct pqc_policy_key *key_out);
 

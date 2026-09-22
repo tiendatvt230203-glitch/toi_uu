@@ -1,4 +1,4 @@
-#include "../../../inc/core/dataplane/bypass.h"
+#include "../../../inc/dataplane/bypass.h"
 #include <errno.h>
 #include <limits.h>
 #include <netinet/in.h>

@@ -1,7 +1,7 @@
-#include "../../../inc/core/dataplane/ping.h"
-#include "../../../inc/core/crypto/crypto.h"
-#include "../../../inc/core/crypto/key_manager.h"
-#include "../../../inc/core/dataplane/tx.h"
+#include "../../../inc/dataplane/ping.h"
+#include "../../../inc/crypto/crypto.h"
+#include "../../../inc/crypto/key_manager.h"
+#include "../../../inc/dataplane/tx.h"
 #include <errno.h>
 #include <string.h>
 

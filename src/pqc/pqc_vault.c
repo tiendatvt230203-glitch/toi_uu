@@ -24,13 +24,13 @@ static bool g_vault_initialized = false;
 
 static void trim_env_val(char *val) {
     if (!val) return;
-    // Strip trailing spaces and newlines
+
     size_t len = strlen(val);
     while (len > 0 && (val[len - 1] == '\r' || val[len - 1] == '\n' || val[len - 1] == ' ' || val[len - 1] == '\t' || val[len - 1] == '"' || val[len - 1] == '\'')) {
         val[len - 1] = '\0';
         len--;
     }
-    // Strip leading quotes/spaces
+
     char *p = val;
     while (*p == ' ' || *p == '\t' || *p == '"' || *p == '\'') p++;
     if (p != val) {
@@ -75,10 +75,10 @@ static void parse_vault_url(const char *url) {
 }
 
 static void load_env_file(void) {
-    // Try opening .env from current directory or parent directory
+
     FILE *fp = fopen(ENV_FILE_PATH, "r");
     if (!fp) {
-        // Fallback to environment variables if .env file not found
+
         const char *e_addr = getenv("VAULT_ADDR");
         const char *e_token = getenv("VAULT_TOKEN");
         const char *e_k1 = getenv("UNSEAL_KEY1");
@@ -97,7 +97,7 @@ static void load_env_file(void) {
 
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
-        // Skip comments and empty lines
+
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '#' || *p == '\0' || *p == '\r' || *p == '\n') continue;
@@ -115,8 +115,8 @@ static void load_env_file(void) {
             parse_vault_url(val);
         } else if (strcmp(key, "VAULT_TOKEN") == 0) {
             strncpy(g_vault_token, val, sizeof(g_vault_token) - 1);
-            // g_vault_token[sizeof(g_vault_token) - 1] = '\0';
-            // fprintf(stderr, "[PQC-VAULT-ENV] Loaded VAULT_TOKEN: [%s] (len=%zu)\n", g_vault_token, strlen(g_vault_token));
+
+
         } else if (strcmp(key, "UNSEAL_KEY1") == 0) {
             strncpy(g_unseal_key1, val, sizeof(g_unseal_key1) - 1);
         } else if (strcmp(key, "UNSEAL_KEY2") == 0) {
@@ -232,7 +232,7 @@ int sig_pqc_vault_ensure_unsealed(void) {
 
     bool sealed = parse_json_sealed_status(response);
     if (!sealed) {
-        // fprintf(stderr, "[PQC-VAULT] Vault is UNSEALED and ready.\n");
+
         return 0;
     }
 
@@ -250,7 +250,7 @@ int sig_pqc_vault_ensure_unsealed(void) {
         send_unseal_key(g_unseal_key3);
     }
 
-    // Verify status again after sending unseal keys
+
     rc = http_request("GET", "/v1/sys/seal-status", NULL, response, sizeof(response));
     if (rc >= 0 && !parse_json_sealed_status(response)) {
         fprintf(stderr, "[PQC-VAULT] SUCCESS: Vault has been UNSEALED!\n");
@@ -273,9 +273,9 @@ int sig_pqc_init_vault(void) {
         } else {
             snprintf(tok_preview, sizeof(tok_preview),"SET (len=%zu)", tok_len);
         }
-    } 
-    // fprintf(stderr, "[PQC-VAULT] Initializing Vault client (Address: %s, Host: %s:%d, Token: '%s')\n",
-    //         g_vault_addr, g_vault_host, g_vault_port, g_vault_token[0] ? g_vault_token : "EMPTY");
+    }
+
+
 
     if (sig_pqc_vault_ensure_unsealed() != 0) {
         fprintf(stderr, "[PQC-VAULT] WARNING: Vault server is not ready/unsealed.\n");
@@ -298,7 +298,7 @@ static bool extract_json_value(const char *json, const char *key_name, char *out
     while (*p == ' ' || *p == ':' || *p == '\t' || *p == '\r' || *p == '\n') p++;
 
     if (*p == '"') {
-        p++; // Skip opening quote
+        p++;
         size_t idx = 0;
         while (*p && *p != '"' && idx < max_len - 1) {
             if (*p == '\\' && *(p + 1) == '"') {
@@ -321,13 +321,13 @@ int sig_pqc_vault_read_key(const char *path_type, const char *fingerprint_filena
     clean_filename[sizeof(clean_filename) - 1] = '\0';
 
     char url_path[512];
-    // Support KV v2 endpoint structure: /v1/kv/data/PQC_Key/<path_type>/<filename>
+
     snprintf(url_path, sizeof(url_path), "/v1/kv/data/PQC-Key/%s/%s", path_type, clean_filename);
 
     char response[16384];
     int rc = http_request("GET", url_path, NULL, response, sizeof(response));
 
-    // Fallback to KV v1 endpoint if KV v2 returned 404
+
     if (rc <= 0 || strncmp(response, "HTTP/1.1 404", 12) == 0) {
         snprintf(url_path, sizeof(url_path), "/v1/kv/PQC-Key/%s/%s", path_type, clean_filename);
         rc = http_request("GET", url_path, NULL, response, sizeof(response));
@@ -339,7 +339,7 @@ int sig_pqc_vault_read_key(const char *path_type, const char *fingerprint_filena
         return -1;
     }
 
-    // Extract the "key" value from the JSON payload
+
     if (extract_json_value(response, "key", out_key_buf, max_len) ||
         extract_json_value(response, "value", out_key_buf, max_len)) {
         fprintf(stderr, "[PQC-VAULT-LOG] SUCCESS: Key [%s/%s] retrieved 100%% directly from HashiCorp Vault (REST Endpoint: %s%s)\n",
@@ -370,20 +370,20 @@ int sig_pqc_vault_write_key(const char *path_type, const char *fingerprint_filen
     int rc = http_request("POST", url_path, body, response, sizeof(response));
 
     if (rc <= 0 || (strncmp(response, "HTTP/1.1 200", 12) != 0 && strncmp(response, "HTTP/1.1 204", 12) != 0)) {
-        // Fallback try KV v1 format
+
         snprintf(url_path, sizeof(url_path), "/v1/kv/data/PQC-Key/%s/%s", path_type, clean_filename);
         snprintf(body, sizeof(body), "{\"key\":\"%s\",\"fingerprint\":\"%s\"}", key_content, clean_filename);
         rc = http_request("POST", url_path, body, response, sizeof(response));
     }
 
     if (rc > 0 && (strncmp(response, "HTTP/1.1 200", 12) == 0 || strncmp(response, "HTTP/1.1 204", 12) == 0)) {
-        // fprintf(stderr, "[PQC-VAULT] Successfully wrote key to Vault: [kv/PQC_Key/%s/%s]\n", path_type, clean_filename);
+
         return 0;
     }
 
     char status_line[256] = "";
     const char *line_end = strstr(response, "\r\n");
-    // if (!line_end) line_end = strchr(response, '\n');
+
     if (line_end) {
         size_t slen = line_end - response;
         if (slen >= sizeof(status_line)) slen = sizeof(status_line) - 1;
@@ -397,8 +397,8 @@ int sig_pqc_vault_write_key(const char *path_type, const char *fingerprint_filen
     if (body_start) body_start += 4;
     else body_start = response;
     fprintf(stderr, "[PQC-VAULT] ERROR: Failed to write key to Vault: [kv/PQC-Key/%s/%s]", path_type, clean_filename);
-    fprintf(stderr, "[PQC-VAULT] ERROR DETAIL -> Status: %s | Response Body: %s\n", 
+    fprintf(stderr, "[PQC-VAULT] ERROR DETAIL -> Status: %s | Response Body: %s\n",
              status_line[0] ? status_line : "N/A", body_start[0] ? body_start : "Empty");
-    
+
     return -1;
 }
