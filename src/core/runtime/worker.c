@@ -269,6 +269,7 @@ int core_worker_tx_step(struct core_runtime *rt, int tx_slot)
         struct ne_ring *ring = &rt->tx_pending[dir][tx_slot];
         int rc = ne_cq_drain_slot(&rt->pair, dir, tx_slot);
         if (rc < 0) return rc;
+        total += rc;
         rc = ne_tx_drain_all(&rt->pair, dir, &ring, 1, 0, tx_slot);
         if (rc < 0) return rc;
         total += rc;
@@ -280,13 +281,16 @@ static void *core_worker_run(void *arg)
 {
     struct core_worker *worker = arg;
     struct core_runtime *rt = worker->context;
+    const struct timespec idle = { .tv_sec = 0, .tv_nsec = CORE_WORKER_IDLE_NS };
     while (!atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
+        int worked = 0;
         if (worker->role == CORE_WORKER_TX) {
-            core_worker_tx_step(rt, worker->slot);
+            worked |= core_worker_tx_step(rt, worker->slot) > 0;
             for (int dir = NE_DIR_LOCAL; dir <= NE_DIR_WAN; dir++) {
                 struct ne_ring *ring = &rt->rx_to_tx[dir][worker->slot];
                 struct ne_packet packets[NE_BATCH_SIZE];
                 unsigned count = ne_ring_try_pop_batch(ring, packets, NE_BATCH_SIZE);
+                worked |= count > 0;
                 for (unsigned i = 0; i < count; i++) {
                     pthread_rwlock_rdlock(&rt->config_lock);
                     int rc = core_worker_crypto_step(rt, &packets[i], worker->slot);
@@ -295,12 +299,13 @@ static void *core_worker_run(void *arg)
                         ne_packet_free(&rt->pair, &packets[i]);
                 }
             }
-            core_worker_tx_step(rt, worker->slot);
+            worked |= core_worker_tx_step(rt, worker->slot) > 0;
         } else {
             enum ne_packet_dir dir = worker->role == CORE_WORKER_LAN_RX
                 ? NE_DIR_LOCAL : NE_DIR_WAN;
             struct ne_packet packets[NE_BATCH_SIZE];
             int count = ne_recv_slot(&rt->pair, dir, worker->slot, packets, NE_BATCH_SIZE);
+            worked |= count > 0;
             for (int i = 0; i < count; i++) {
                 pthread_rwlock_rdlock(&rt->config_lock);
                 int rc = core_worker_rx_submit(rt, &packets[i]);
@@ -308,8 +313,10 @@ static void *core_worker_run(void *arg)
                 if (rc)
                     ne_packet_free(&rt->pair, &packets[i]);
             }
-            ne_fill_slot(&rt->pair, dir, worker->slot);
+            worked |= ne_fill_slot(&rt->pair, dir, worker->slot) > 0;
         }
+        if (!worked)
+            nanosleep(&idle, NULL);
     }
     core_l2_pqc_reassembly_reset();
     return NULL;
