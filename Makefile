@@ -3,7 +3,7 @@ CLANG  = clang
 
 CFLAGS = -D_GNU_SOURCE -DPQC_FIXED_TEST_KEY=1 -I. -Iinc -Iinc/core -Iinc/pqc -Isrc/db -I../include -Isrc/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
-          ./lib/libxdp.so.1 -lpq ./lib/libscrypt.so
+          ./lib/libxdp.so.1 -lbpf -lpq ./lib/libscrypt.so
 
 BPF_CFLAGS     = -O2 -target bpf -g -DNE_BPF
 KERNEL_HEADERS = /usr/include
@@ -11,7 +11,7 @@ KERNEL_HEADERS = /usr/include
 LIB_DIR = lib
 TARGET  = network-encryptor
 
-PQC_SRCS = $(wildcard src/pqc/*.c)
+PQC_SRCS = $(filter-out %-old.c,$(wildcard src/pqc/*.c))
 
 CORE_SRCS = $(wildcard src/core/runtime/*.c) \
             $(wildcard src/core/profile/*.c) \

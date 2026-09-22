@@ -24,10 +24,26 @@
 #define CORE_ROUTE_IDLE_NS (60ULL * 1000000000ULL)
 #define CORE_TCP_WAN_PACKET_WINDOW 8192u
 #define CORE_UDP_WAN_PACKET_WINDOW 16384u
-#define NE_FRAME 2048u
-#define NE_N_FRAMES 1048576u
+#define NE_FRAME 4096u
+#define NE_N_FRAMES 524288u
+#define NE_XDP_PACKET_HEADROOM 256u
+#define NE_FRAME_DATA_MAX (NE_FRAME - NE_XDP_PACKET_HEADROOM)
+#define NE_PACKET_MAX_SEGMENTS 8u
+#define NE_PACKET_MAX_CONTINUATIONS (NE_PACKET_MAX_SEGMENTS - 1u)
+#define CORE_JUMBO_FLAG 0x80u
+#define CORE_JUMBO_CORE_MASK 0x7fu
+#define CORE_JUMBO_SHIM_SIZE 16u
+#define CORE_JUMBO_SLOTS 4096u
+#define CORE_JUMBO_TIMEOUT_NS (200ULL * 1000000ULL)
 #define NE_BATCH_SIZE 64u
 #define NE_FQ_PREFILL 16384u
+#define NE_FQ_REFILL_BUDGET 1024u
+#ifndef XDP_PKT_CONTD
+#define XDP_PKT_CONTD (1u << 0)
+#endif
+#ifndef XDP_USE_SG
+#define XDP_USE_SG (1u << 4)
+#endif
 
 /* Shared core and XDP constants. */
 #define IPPROTO_ICMP_VAL 1
@@ -37,7 +53,7 @@
 #define ETH_P_NE_ARP_ENC 0x1048
 #define ETH_P_CFM 0x8902
 #define ETH_P_ARP_VAL 0x0806
-#define PATH_MTU 1500
+#define PATH_MTU 9000
 #define ETH_FRAME_MAX (14 + PATH_MTU)
 
 #ifndef NE_BPF
@@ -109,18 +125,20 @@ struct pqc_profile_config {
     char peer_public_key[PQC_PEER_PUB_MAX];
 };
 
+struct ne_xsk_queue {
+    struct xsk_socket *xsk;
+    struct xsk_ring_cons rx;
+    struct xsk_ring_prod tx;
+    struct xsk_ring_prod fq;
+    struct xsk_ring_cons cq;
+    uint32_t rx_pending;
+};
+
 struct local_config {
     char ifname[IF_NAMESIZE];
     int ifindex;
     int queue_count;
-    struct {
-        struct xsk_socket *xsk;
-        struct xsk_ring_cons rx;
-        struct xsk_ring_prod tx;
-        struct xsk_ring_prod fq;
-        struct xsk_ring_cons cq;
-        uint32_t rx_pending;
-    } queues[MAX_QUEUES];
+    struct ne_xsk_queue queues[MAX_QUEUES];
     uint64_t tx_no_free;
     uint32_t xdp_flags;
 };
@@ -133,14 +151,7 @@ struct wan_config {
     int bandwidth_weight;
     int ifindex;
     int queue_count;
-    struct {
-        struct xsk_socket *xsk;
-        struct xsk_ring_cons rx;
-        struct xsk_ring_prod tx;
-        struct xsk_ring_prod fq;
-        struct xsk_ring_cons cq;
-        uint32_t rx_pending;
-    } queues[MAX_QUEUES];
+    struct ne_xsk_queue queues[MAX_QUEUES];
     uint64_t tx_no_free;
     uint32_t xdp_flags;
 };
@@ -166,6 +177,14 @@ struct app_config {
 struct ne_packet {
     uint64_t addr;
     uint32_t len;
+    uint64_t continuation_addr[NE_PACKET_MAX_CONTINUATIONS];
+    uint32_t continuation_len[NE_PACKET_MAX_CONTINUATIONS];
+    uint32_t total_len;
+    uint8_t segment_count;
+    uint8_t xdp_options;
+    uint32_t jumbo_packet_id;
+    uint8_t jumbo_fragment_index;
+    uint8_t jumbo_fragment_count;
     uint16_t wire_ethertype;
     uint8_t dir;
     uint8_t wan_idx;
@@ -186,17 +205,25 @@ struct core_wan_flow {
     uint64_t last_seen_ns;
 };
 
+struct core_packet_batch {
+    uint8_t data[NE_PACKET_MAX_SEGMENTS][NE_FRAME_DATA_MAX];
+    uint32_t len[NE_PACKET_MAX_SEGMENTS];
+    uint32_t count;
+};
+
 struct core_fragment_slot {
-    uint64_t id;
     uint64_t seen_ns;
-    uint16_t first_len;
-    uint16_t second_len;
-    uint8_t policy_id;
+    uint32_t id;
+    uint16_t total_len;
+    uint16_t wire_type;
     uint8_t core_id;
+    uint16_t offset[NE_PACKET_MAX_SEGMENTS];
+    uint16_t length[NE_PACKET_MAX_SEGMENTS];
+    uint8_t policy_id;
+    uint8_t source_mac[6];
+    uint8_t count;
     uint8_t seen;
-    uint8_t eth[14];
-    uint8_t first[1500];
-    uint8_t second[1500];
+    uint8_t data[ETH_FRAME_MAX];
 };
 
 struct ne_ring {
@@ -222,6 +249,7 @@ struct ne_pool {
 struct bpf_object;
 
 struct ne_pair {
+    struct app_config *config;
     void *bufs;
     size_t bufsize;
     uint32_t frame_size;
@@ -247,6 +275,7 @@ struct core_worker {
     pthread_t thread;
     enum core_worker_role role;
     int cpu_id;
+    int slot;
     int running;
     void *context;
 };
@@ -258,6 +287,7 @@ struct core_flow_route {
     uint16_t port_b;
     uint8_t protocol;
     uint8_t worker_idx;
+    uint8_t tx_slot;
     atomic_uchar valid;
 };
 
@@ -272,7 +302,7 @@ struct core_runtime {
     int worker_count;
     int initialized;
     int running;
-    int stop_requested;
+    atomic_int stop_requested;
 };
 
 #endif /* NE_BPF */

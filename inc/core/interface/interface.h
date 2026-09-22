@@ -13,7 +13,7 @@ uint32_t ne_ring_try_pop_batch(struct ne_ring *r, struct ne_packet *pkts,
                                uint32_t max_n);
 uint32_t ne_ring_count(const struct ne_ring *r);
 
-int ne_pair_open(struct ne_pair *p, const struct app_config *cfg);
+int ne_pair_open(struct ne_pair *p, struct app_config *cfg);
 void ne_pair_close(struct ne_pair *p, const struct app_config *cfg);
 
 /* AF_XDP: FILL supplies frames for RX; CQ returns completed TX frames. */
@@ -28,4 +28,9 @@ int ne_cq_drain_slot(struct ne_pair *p, enum ne_packet_dir dir, int tx_slot);
 void *ne_packet_data(struct ne_pair *p, uint64_t addr);
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out);
 void ne_frame_free(struct ne_pair *p, uint64_t addr);
+void ne_packet_free(struct ne_pair *p, const struct ne_packet *pkt);
+int ne_packet_copy(struct ne_pair *p, const struct ne_packet *pkt,
+                    uint8_t *out, uint32_t capacity);
+int ne_packet_store(struct ne_pair *p, const uint8_t *data, uint32_t len,
+                     struct ne_packet *pkt);
 #endif

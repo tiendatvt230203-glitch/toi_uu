@@ -12,7 +12,7 @@ struct {
     __type(value, int);
 } wan_xsks_map SEC(".maps");
 
-SEC("xdp")
+SEC("xdp.frags")
 int xdp_wan_redirect_prog(struct xdp_md *ctx)
 {
     void *data = (void *)(long)ctx->data;
