@@ -166,9 +166,8 @@ void *ne_packet_data(struct ne_pair *p, uint64_t addr)
 
 void ne_packet_free(struct ne_pair *p, const struct ne_packet *pkt)
 {
-    ne_frame_free(p, pkt->addr);
-    for (unsigned i = 1; i < pkt->segment_count; i++)
-        ne_frame_free(p, pkt->continuation_addr[i - 1]);
+    for (unsigned i = 0; i < pkt->segment_count; i++)
+        ne_frame_free(p, pkt->segment_addr[i]);
 }
 
 int ne_packet_copy(struct ne_pair *p, const struct ne_packet *pkt,
@@ -178,8 +177,8 @@ int ne_packet_copy(struct ne_pair *p, const struct ne_packet *pkt,
     uint32_t copied = 0;
     if (segments > NE_PACKET_MAX_SEGMENTS) return -EMSGSIZE;
     for (unsigned i = 0; i < segments; i++) {
-        uint64_t addr = i ? pkt->continuation_addr[i - 1] : pkt->addr;
-        uint32_t len = i ? pkt->continuation_len[i - 1] : pkt->len;
+        uint64_t addr = pkt->segment_addr[i];
+        uint32_t len = pkt->segment_len[i];
         if (addr >= p->bufsize || len > p->bufsize - addr ||
             len > capacity - copied) return -EMSGSIZE;
         memcpy(out + copied, ne_packet_data(p, addr), len);
@@ -205,8 +204,8 @@ int ne_packet_store(struct ne_pair *p, const uint8_t *data, uint32_t len,
         if (take > NE_FRAME_DATA_MAX) take = NE_FRAME_DATA_MAX;
         memcpy(ne_packet_data(p, addr), data + offset, take);
         unsigned i = pkt->segment_count++;
-        if (!i) { pkt->addr = addr; pkt->len = take; }
-        else { pkt->continuation_addr[i-1] = addr; pkt->continuation_len[i-1] = take; }
+        pkt->segment_addr[i] = addr;
+        pkt->segment_len[i] = take;
         offset += take;
     }
     pkt->total_len = len;
@@ -399,8 +398,8 @@ int ne_recv_slot(struct ne_pair *p, enum ne_packet_dir dir, int rx_slot,
             while (consumed < n && pkt.segment_count < NE_PACKET_MAX_SEGMENTS) {
                 const struct xdp_desc *d = xsk_ring_cons__rx_desc(&q->rx, idx + consumed++);
                 unsigned i = pkt.segment_count++;
-                if (!i) { pkt.addr = d->addr; pkt.len = d->len; }
-                else { pkt.continuation_addr[i-1] = d->addr; pkt.continuation_len[i-1] = d->len; }
+                pkt.segment_addr[i] = d->addr;
+                pkt.segment_len[i] = d->len;
                 pkt.total_len += d->len;
                 if (!(d->options & XDP_PKT_CONTD)) { complete = 1; break; }
             }
@@ -445,8 +444,7 @@ int ne_tx_drain_all(struct ne_pair *p, enum ne_packet_dir dir,
             uint32_t tail = __atomic_load_n(&ring->tail, __ATOMIC_RELAXED);
             uint32_t head = __atomic_load_n(&ring->head, __ATOMIC_ACQUIRE);
             if (tail == head) break;
-            struct ne_packet first = ring->buf[tail & ring->mask];
-            unsigned group = first.jumbo_fragment_count > 1 ? first.jumbo_fragment_count : 1;
+            unsigned group = 1;
             if (group > NE_PACKET_MAX_SEGMENTS || head - tail < group) break;
             unsigned needed = 0;
             for (unsigned j = 0; j < group; j++) {
@@ -461,8 +459,8 @@ int ne_tx_drain_all(struct ne_pair *p, enum ne_packet_dir dir,
                 unsigned segments = pkt->segment_count ? pkt->segment_count : 1;
                 for (unsigned i = 0; i < segments; i++) {
                     struct xdp_desc *d = xsk_ring_prod__tx_desc(&slot->tx, idx + written++);
-                    d->addr = i ? pkt->continuation_addr[i-1] : pkt->addr;
-                    d->len = i ? pkt->continuation_len[i-1] : pkt->len;
+                    d->addr = pkt->segment_addr[i];
+                    d->len = pkt->segment_len[i];
                     d->options = i + 1 < segments ? XDP_PKT_CONTD : 0;
                 }
             }

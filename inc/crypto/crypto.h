@@ -8,7 +8,7 @@ int core_l2_pqc_fragment(const uint8_t *pkt, uint32_t len,
                           struct core_packet_batch *out);
 
 int core_l2_pqc_reassemble(uint8_t *pkt, uint32_t *len, uint32_t capacity,
-                            uint16_t wire_type, const uint8_t key[32]);
+                            uint16_t wire_type);
 void core_l2_pqc_reassembly_reset(void);
 int core_l2_pqc_encrypt(uint8_t *pkt, uint32_t *len, uint32_t capacity,
                         uint16_t wire_type, uint8_t policy_id,

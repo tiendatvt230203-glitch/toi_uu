@@ -139,7 +139,7 @@ int core_worker_select_decrypt_core(const uint8_t *pkt, uint32_t len)
     if (!pkt || len < 16)
         return -EINVAL;
 
-    uint8_t id = pkt[15] & CORE_JUMBO_CORE_MASK;
+    uint8_t id = pkt[len - 1] & CORE_JUMBO_CORE_MASK;
     if (id >= CORE_TX_WORKERS)
         return -EINVAL;
     return id;
@@ -169,7 +169,7 @@ int core_worker_rx_submit(struct core_runtime *rt, const struct ne_packet *pkt)
 int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
                             int worker_idx)
 {
-    uint8_t data[ETH_FRAME_MAX];
+    uint8_t data[CORE_ENCRYPTED_FRAME_MAX];
     struct core_packet_batch batch;
     struct ne_packet output[NE_PACKET_MAX_SEGMENTS];
     struct ne_ring *ring;
@@ -198,15 +198,25 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
         rc = core_lan_process(&rt->config, data, len, worker_idx, &batch);
         if (rc) return rc;
         ring = &rt->tx_pending[NE_DIR_WAN][tx];
-        for (; count < batch.count; count++) {
-            rc = ne_packet_store(&rt->pair, batch.data[count],
-                                  batch.len[count], &output[count]);
+        uint8_t wire[ETH_FRAME_MAX];
+        uint32_t wire_len = 0;
+        for (unsigned seg = 0; seg < batch.count; seg++) {
+            if (batch.len[seg] > sizeof(wire) - wire_len) {
+                rc = -EMSGSIZE; goto discard;
+            }
+            memcpy(wire + wire_len, batch.data[seg], batch.len[seg]);
+            wire_len += batch.len[seg];
+            if (!batch.end_of_packet[seg]) continue;
+            rc = ne_packet_store(&rt->pair, wire, wire_len, &output[count]);
             if (rc) goto discard;
             output[count].dir = NE_DIR_WAN;
             output[count].wan_idx = 0;
             output[count].tx_slot = tx;
-            output[count].jumbo_fragment_index = count;
-            output[count].jumbo_fragment_count = batch.count;
+            count++;
+            wire_len = 0;
+        }
+        if (wire_len || count != batch.packet_count) {
+            rc = -EINVAL; goto discard;
         }
     } else {
         if (pkt->dir != NE_DIR_WAN) return -EINVAL;

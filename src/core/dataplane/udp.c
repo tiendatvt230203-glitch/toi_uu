@@ -25,10 +25,12 @@ int core_udp_handle_wan_lan(const struct app_config *cfg, uint8_t *pkt,
 {
     uint8_t key[32];
     if (!pkt || !len || *len < 16) return -EINVAL;
-    uint8_t policy_id = pkt[14];
-    int rc = core_key_get(policy_id, key, sizeof(key));
+    int rc = core_l2_pqc_reassemble(pkt, len, capacity, NE_L2_UDP_ETHERTYPE);
     if (rc) return rc;
-    rc = core_l2_pqc_reassemble(pkt, len, capacity, NE_L2_UDP_ETHERTYPE, key);
+    uint8_t policy_id = pkt[*len - 2];
+    rc = core_key_get(policy_id, key, sizeof(key));
+    if (rc) return rc;
+    rc = core_l2_pqc_decrypt(pkt, len, capacity, NE_L2_UDP_ETHERTYPE, key);
     memset(key, 0, sizeof(key));
     if (rc) return rc;
     return core_tx_match_in(cfg, pkt, *len, policy_id) > 0 ? 0 : -EACCES;

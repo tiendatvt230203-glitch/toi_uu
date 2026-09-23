@@ -31,88 +31,68 @@ static int core_nonce(uint8_t nonce[12])
     return 0;
 }
 
-int core_l2_pqc_encrypt(uint8_t *pkt, uint32_t *len, uint32_t capacity,
-                        uint16_t wire_type, uint8_t policy_id,
-                        uint8_t core_id, const uint8_t key[32])
-{
-    SCryptCipherCtx *cipher;
-    uint8_t nonce[12];
-    word32 written = 0, final = 0, tag_len = 16;
-    uint32_t plain_len;
-    int rc = -EIO;
 
-    if (!pkt || !len || !key || *len < 14 || policy_id == 0 ||
-        pkt[12] != 0x08 || pkt[13] != 0x00 ||
-        *len > capacity || capacity < 30u ||
-        *len > capacity - 30u || *len > NE_FRAME_DATA_MAX - 30u)
-        return -EMSGSIZE;
+int core_l2_pqc_encrypt(uint8_t *pkt, uint32_t *len, uint32_t capacity,
+                        uint16_t type, uint8_t policy, uint8_t core,
+                        const uint8_t key[32])
+{
+    if (!pkt || !len || !key || *len < 34 || *len > ETH_FRAME_MAX ||
+        capacity < *len + 30 || !policy || core >= CORE_TX_WORKERS ||
+        pkt[12] != 8 || pkt[13]) return -EINVAL;
     pthread_once(&g_cipher_once, core_cipher_init);
-    if (!g_cipher_ready || core_nonce(nonce) != 0)
-        return -EIO;
-    cipher = scrypt_CipherCtxNew();
-    if (!cipher)
-        return -ENOMEM;
-    plain_len = *len - 14u;
-    memmove(pkt + 28, pkt + 14, plain_len);
-    pkt[12] = (uint8_t)(wire_type >> 8);
-    pkt[13] = (uint8_t)wire_type;
-    pkt[14] = policy_id;
-    pkt[15] = core_id;
-    memcpy(pkt + 16, nonce, sizeof(nonce));
-    if (scrypt_CipherInit(cipher, CIPHER_TYPE_AES_256_GCM, key, 32,
-                          nonce, sizeof(nonce), SCRYPT_ENCRYPTION) != 0 ||
-        scrypt_CipherSetTagSize(cipher, 16) != 0 ||
-        scrypt_CipherUpdateAAD(cipher, pkt + 12, 4) != 0 ||
-        scrypt_CipherUpdate(cipher, pkt + 28, plain_len, pkt + 28,
-                            &written) != 0 ||
-        scrypt_CipherFinal(cipher, pkt + 28 + written, &final) != 0 ||
-        scrypt_CipherGetTag(cipher, pkt + 28 + written + final,
-                            &tag_len) != 0 || tag_len != 16)
-        goto out;
-    *len = 28u + written + final + tag_len;
+    uint8_t nonce[12], aad[16];
+    if (!g_cipher_ready || core_nonce(nonce)) return -EIO;
+    uint32_t bytes = *len - 14;
+    pkt[12] = type >> 8; pkt[13] = type;
+    memcpy(aad, pkt, 14); aad[14] = policy; aad[15] = core;
+    SCryptCipherCtx *ctx = scrypt_CipherCtxNew();
+    if (!ctx) return -ENOMEM;
+    word32 written = 0, final = 0, tag_len = 16;
+    int rc = -EIO;
+    if (scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_GCM, key, 32, nonce, 12, SCRYPT_ENCRYPTION) ||
+        scrypt_CipherSetTagSize(ctx, 16) ||
+        scrypt_CipherUpdateAAD(ctx, aad, sizeof(aad)) ||
+        scrypt_CipherUpdate(ctx, pkt + 14, bytes, pkt + 14, &written) ||
+        scrypt_CipherFinal(ctx, pkt + 14 + written, &final) ||
+        written + final != bytes ||
+        scrypt_CipherGetTag(ctx, pkt + 14 + bytes, &tag_len) || tag_len != 16) goto done;
+    memcpy(pkt + *len + 16, nonce, 12);
+    pkt[*len + 28] = policy; pkt[*len + 29] = core;
+    *len += 30;
     rc = 0;
-out:
-    scrypt_CipherCtxFree(cipher);
+done:
+    scrypt_CipherCtxFree(ctx);
     return rc;
 }
 
 int core_l2_pqc_decrypt(uint8_t *pkt, uint32_t *len, uint32_t capacity,
-                        uint16_t wire_type, const uint8_t key[32])
+                        uint16_t type, const uint8_t key[32])
 {
-    SCryptCipherCtx *cipher;
-    word32 written = 0, final = 0;
-    uint32_t cipher_len;
-    int rc = -EBADMSG;
-
-    if (!pkt || !len || !key || *len < 28u + 16u ||
-        *len > capacity || *len > NE_FRAME_DATA_MAX ||
-        pkt[12] != (uint8_t)(wire_type >> 8) ||
-        pkt[13] != (uint8_t)wire_type)
-        return -EINVAL;
+    if (!pkt || !len || !key || *len < 64 || *len > capacity ||
+        *len > CORE_ENCRYPTED_FRAME_MAX || pkt[12] != (uint8_t)(type >> 8) ||
+        pkt[13] != (uint8_t)type || pkt[*len-1] >= CORE_TX_WORKERS ||
+        !pkt[*len-2]) return -EINVAL;
     pthread_once(&g_cipher_once, core_cipher_init);
-    if (!g_cipher_ready)
-        return -EIO;
-    cipher = scrypt_CipherCtxNew();
-    if (!cipher)
-        return -ENOMEM;
-    cipher_len = *len - 28u - 16u;
-    if (scrypt_CipherInit(cipher, CIPHER_TYPE_AES_256_GCM, key, 32,
-                          pkt + 16, 12, SCRYPT_DECRYPTION) != 0 ||
-        scrypt_CipherSetTagSize(cipher, 16) != 0 ||
-        scrypt_CipherUpdateAAD(cipher, pkt + 12, 4) != 0 ||
-        scrypt_CipherSetTag(cipher, pkt + 28 + cipher_len, 16) != 0 ||
-        scrypt_CipherUpdate(cipher, pkt + 28, cipher_len, pkt + 28,
-                            &written) != 0 ||
-        scrypt_CipherFinal(cipher, pkt + 28 + written, &final) != 0 ||
-        written + final != cipher_len)
-        goto out;
-    memmove(pkt + 14, pkt + 28, cipher_len);
-    pkt[12] = 0x08;
-    pkt[13] = 0x00;
-    *len = 14u + cipher_len;
+    if (!g_cipher_ready) return -EIO;
+    uint32_t bytes = *len - 44;
+    uint8_t aad[16];
+    memcpy(aad, pkt, 14); aad[14] = pkt[*len-2]; aad[15] = pkt[*len-1];
+    SCryptCipherCtx *ctx = scrypt_CipherCtxNew();
+    if (!ctx) return -ENOMEM;
+    word32 written = 0, final = 0;
+    int rc = -EBADMSG;
+    if (scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_GCM, key, 32,
+                         pkt + *len - 14, 12, SCRYPT_DECRYPTION) ||
+        scrypt_CipherSetTagSize(ctx, 16) ||
+        scrypt_CipherUpdateAAD(ctx, aad, sizeof(aad)) ||
+        scrypt_CipherSetTag(ctx, pkt + 14 + bytes, 16) ||
+        scrypt_CipherUpdate(ctx, pkt + 14, bytes, pkt + 14, &written) ||
+        scrypt_CipherFinal(ctx, pkt + 14 + written, &final) ||
+        written + final != bytes) goto done;
+    *len -= 30; pkt[12] = 8; pkt[13] = 0;
     rc = 0;
-out:
-    scrypt_CipherCtxFree(cipher);
+done:
+    scrypt_CipherCtxFree(ctx);
     return rc;
 }
 
@@ -126,120 +106,106 @@ static uint16_t jumbo_get16(const uint8_t *p)
 
 static void jumbo_put16(uint8_t *p, uint16_t value)
 {
-    p[0] = value >> 8;
-    p[1] = value;
+    p[0] = value >> 8; p[1] = value;
 }
 
 int core_l2_pqc_fragment(const uint8_t *pkt, uint32_t len,
-                          uint16_t wire_type, uint8_t policy_id,
-                          uint8_t core_id, const uint8_t key[32],
-                          struct core_packet_batch *out)
+                          uint16_t type, uint8_t policy, uint8_t core,
+                          const uint8_t key[32], struct core_packet_batch *out)
 {
-    if (!pkt || !out || !key || len < 14 || len > ETH_FRAME_MAX ||
-        core_id >= CORE_TX_WORKERS || pkt[12] != 8 || pkt[13] != 0)
-        return -EINVAL;
-    out->count = 0;
-    if (len + 30u <= NE_FRAME_DATA_MAX) {
-        memcpy(out->data[0], pkt, len);
-        out->len[0] = len;
-        int rc = core_l2_pqc_encrypt(out->data[0], &out->len[0],
-                                     NE_FRAME_DATA_MAX, wire_type,
-                                     policy_id, core_id, key);
-        if (!rc) out->count = 1;
-        return rc;
+    if (!pkt || !out || len > ETH_FRAME_MAX) return -EINVAL;
+    uint8_t encrypted[CORE_ENCRYPTED_FRAME_MAX], wire[ETH_FRAME_MAX];
+    memcpy(encrypted, pkt, len);
+    memset(out, 0, sizeof(*out));
+    int rc = core_l2_pqc_encrypt(encrypted, &len, sizeof(encrypted), type, policy, core, key);
+    if (rc) return rc;
+    unsigned frames = len > ETH_FRAME_MAX ? 2 : 1;
+    uint32_t id = frames == 2 ? atomic_fetch_add(&g_jumbo_id, 1) : 0;
+    uint32_t total = len - 15, offset = 0;
+    for (unsigned frame = 0; frame < frames; frame++) {
+        uint32_t wire_len;
+        if (frames == 1) {
+            memcpy(wire, encrypted, len); wire_len = len;
+        } else {
+            uint32_t bytes = total - offset;
+            if (!frame) {
+                bytes -= 29;
+                if (bytes > CORE_JUMBO_DATA_MAX) bytes = CORE_JUMBO_DATA_MAX;
+            }
+            memcpy(wire, encrypted, 14);
+            memcpy(wire + 14, encrypted + 14 + offset, bytes);
+            uint8_t *shim = wire + 14 + bytes;
+            memcpy(shim, "JMB\2", 4);
+            shim[4] = id >> 24; shim[5] = id >> 16;
+            shim[6] = id >> 8; shim[7] = id;
+            jumbo_put16(shim + 8, total); jumbo_put16(shim + 10, offset);
+            jumbo_put16(shim + 12, bytes);
+            shim[14] = frame; shim[15] = 2;
+            wire_len = 14 + bytes + CORE_JUMBO_HEADER_SIZE;
+            wire[wire_len - 1] = core | CORE_JUMBO_FLAG;
+            offset += bytes;
+        }
+        for (uint32_t pos = 0; pos < wire_len;) {
+            unsigned seg = out->count++;
+            if (seg >= NE_PACKET_MAX_SEGMENTS) return -EMSGSIZE;
+            uint32_t bytes = wire_len - pos;
+            if (bytes > NE_FRAME_DATA_MAX) bytes = NE_FRAME_DATA_MAX;
+            memcpy(out->data[seg], wire + pos, bytes);
+            out->len[seg] = bytes; pos += bytes;
+            out->end_of_packet[seg] = pos == wire_len;
+        }
     }
-    uint32_t room = NE_FRAME_DATA_MAX - 14u - 30u - CORE_JUMBO_SHIM_SIZE;
-    uint32_t count = (len + room - 1u) / room;
-    uint32_t id = atomic_fetch_add(&g_jumbo_id, 1);
-    uint32_t offset = 0;
-    if (count > NE_PACKET_MAX_SEGMENTS) return -EMSGSIZE;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t bytes = len - offset;
-        if (bytes > room) bytes = room;
-        uint8_t *wire = out->data[i], *shim = wire + 14;
-        memcpy(wire, pkt, 14);
-        memcpy(shim, "JMB\1", 4);
-        shim[4] = id >> 24; shim[5] = id >> 16;
-        shim[6] = id >> 8; shim[7] = id;
-        jumbo_put16(shim + 8, len);
-        jumbo_put16(shim + 10, offset);
-        jumbo_put16(shim + 12, bytes);
-        shim[14] = i; shim[15] = count;
-        memcpy(shim + CORE_JUMBO_SHIM_SIZE, pkt + offset, bytes);
-        out->len[i] = 14u + CORE_JUMBO_SHIM_SIZE + bytes;
-        int rc = core_l2_pqc_encrypt(wire, &out->len[i], NE_FRAME_DATA_MAX,
-                                     wire_type, policy_id,
-                                     core_id | CORE_JUMBO_FLAG, key);
-        if (rc) return rc;
-        offset += bytes;
-    }
-    out->count = count;
+    out->packet_count = frames;
     return 0;
 }
 
 void core_l2_pqc_reassembly_reset(void)
 {
-    free(g_jumbo_slots);
-    g_jumbo_slots = NULL;
+    free(g_jumbo_slots); g_jumbo_slots = NULL;
 }
 
 int core_l2_pqc_reassemble(uint8_t *pkt, uint32_t *len, uint32_t capacity,
-                            uint16_t wire_type, const uint8_t key[32])
+                            uint16_t type)
 {
-    if (!pkt || !len || *len < 16) return -EINVAL;
-    uint8_t policy = pkt[14], core = pkt[15];
+    if (!pkt || !len || *len < 60 || *len > ETH_FRAME_MAX || *len > capacity ||
+        pkt[12] != (uint8_t)(type >> 8) || pkt[13] != (uint8_t)type) return -EINVAL;
+    uint8_t core = pkt[*len - 1];
     if ((core & CORE_JUMBO_CORE_MASK) >= CORE_TX_WORKERS) return -EINVAL;
-    int rc = core_l2_pqc_decrypt(pkt, len, capacity, wire_type, key);
-    if (rc || !(core & CORE_JUMBO_FLAG)) return rc;
-    if (*len < 14u + CORE_JUMBO_SHIM_SIZE) return -EBADMSG;
-    uint8_t *shim = pkt + 14;
-    if (memcmp(shim, "JMB\1", 4)) return -EBADMSG;
+    if (!(core & CORE_JUMBO_FLAG)) return *len >= 64 ? 0 : -EBADMSG;
+    uint8_t *shim = pkt + *len - CORE_JUMBO_HEADER_SIZE;
+    if (memcmp(shim, "JMB\2", 4)) return -EBADMSG;
     uint32_t id = ((uint32_t)shim[4] << 24) | ((uint32_t)shim[5] << 16) |
                   ((uint32_t)shim[6] << 8) | shim[7];
     uint16_t total = jumbo_get16(shim + 8), offset = jumbo_get16(shim + 10);
     uint16_t bytes = jumbo_get16(shim + 12);
-    uint8_t index = shim[14], count = shim[15];
-    if (total < 14 || total > ETH_FRAME_MAX || total > capacity ||
-        count < 2 || count > NE_PACKET_MAX_SEGMENTS || index >= count ||
-        !bytes || offset + bytes > total ||
-        *len != 14u + CORE_JUMBO_SHIM_SIZE + bytes) return -EBADMSG;
-    if (!g_jumbo_slots) g_jumbo_slots = calloc(CORE_JUMBO_SLOTS, sizeof(*g_jumbo_slots));
-    if (!g_jumbo_slots) return -ENOMEM;
-    uint32_t hash = id ^ ((uint32_t)policy << 24) ^ wire_type;
-    for (unsigned i = 6; i < 12; i++) hash = hash * 33u ^ pkt[i];
-    struct core_fragment_slot *slot = NULL, *empty = NULL;
-    for (unsigned i = 0; i < CORE_JUMBO_SLOTS; i++) {
-        struct core_fragment_slot *s = &g_jumbo_slots[(hash + i) % CORE_JUMBO_SLOTS];
-        if (!s->seen) { if (!empty) empty = s; continue; }
-        if (s->id == id && s->policy_id == policy && s->wire_type == wire_type &&
-            s->core_id == (core & CORE_JUMBO_CORE_MASK) &&
-            !memcmp(s->source_mac, pkt + 6, 6)) { slot = s; break; }
+    uint8_t index = shim[14];
+    if (shim[15] != 2 || index > 1 || total + 15u <= ETH_FRAME_MAX ||
+        total + 15u > CORE_ENCRYPTED_FRAME_MAX || total + 15u > capacity ||
+        !bytes || bytes > CORE_JUMBO_DATA_MAX || offset + bytes > total ||
+        *len != 14u + bytes + CORE_JUMBO_HEADER_SIZE) return -EBADMSG;
+    if (!g_jumbo_slots) {
+        if (index) return -EBADMSG;
+        g_jumbo_slots = calloc(CORE_JUMBO_SLOTS, sizeof(*g_jumbo_slots));
+        if (!g_jumbo_slots) return -ENOMEM;
     }
-    if (!slot) {
-        if (index != 0 || offset != 0) return -EBADMSG;
-        slot = empty;
-        if (!slot) return -ENOSPC;
-        memset(slot, 0, sizeof(*slot));
-        slot->id = id; slot->policy_id = policy; slot->wire_type = wire_type;
-        slot->core_id = core & CORE_JUMBO_CORE_MASK;
-        slot->total_len = total; slot->count = count;
-        memcpy(slot->source_mac, pkt + 6, 6);
+    struct core_fragment_slot *slot = &g_jumbo_slots[id % CORE_JUMBO_SLOTS];
+    core &= CORE_JUMBO_CORE_MASK;
+    if (slot->active && (slot->id != id || slot->core_id != core ||
+                         memcmp(slot->ethernet, pkt, 14))) return -ENOSPC;
+    if (!slot->active) {
+        if (index || offset) return -EBADMSG;
+        slot->id = id; slot->core_id = core; slot->total = total; slot->received = 0;
+        memcpy(slot->ethernet, pkt, 14);
     }
-    if (slot->total_len != total || slot->count != count ||
-        slot->seen != (1u << index) - 1u ||
-        offset != (index ? slot->offset[index - 1] + slot->length[index - 1] : 0)) {
-        memset(slot, 0, sizeof(*slot));
-        return -EBADMSG;
+    if (slot->total != total || index != slot->active || offset != slot->received ||
+        (!index && bytes > total - 29u) || (index && offset + bytes != total)) {
+        memset(slot, 0, sizeof(*slot)); return -EBADMSG;
     }
-    memcpy(slot->data + offset, shim + CORE_JUMBO_SHIM_SIZE, bytes);
-    slot->offset[index] = offset; slot->length[index] = bytes;
-    slot->seen |= 1u << index;
-    if (slot->seen != (1u << count) - 1u) return 1;
-    uint32_t covered = 0;
-    for (unsigned i = 0; i < count; i++) covered += slot->length[i];
-    if (covered != total) { memset(slot, 0, sizeof(*slot)); return -EBADMSG; }
-    memcpy(pkt, slot->data, total);
-    *len = total;
+    memcpy(slot->data + offset, pkt + 14, bytes);
+    slot->received += bytes; slot->active = 1;
+    if (!index) return 1;
+    memcpy(pkt, slot->ethernet, 14); memcpy(pkt + 14, slot->data, total);
+    pkt[14 + total] = core; *len = 15 + total;
     memset(slot, 0, sizeof(*slot));
     return 0;
 }
