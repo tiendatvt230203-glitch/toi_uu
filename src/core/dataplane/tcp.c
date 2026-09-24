@@ -6,15 +6,15 @@
 #include <string.h>
 
 int core_tcp_handle_lan_wan(const struct app_config *cfg,
-    const uint8_t *pkt, uint32_t len, uint8_t policy_id, uint8_t core_id,
-    struct core_packet_batch *out)
+    uint8_t *pkt, uint32_t len, uint32_t capacity, uint8_t policy_id,
+    uint8_t core_id, struct core_packet_batch *out)
 {
     uint8_t key[32];
     if (!cfg || cfg->wan_count != 1 || !cfg->wans[0].dataplane)
         return -ENODEV;
     int rc = core_key_get(policy_id, key, sizeof(key));
     if (rc) return rc;
-    rc = core_l2_pqc_fragment(pkt, len, NE_L2_TCP_ETHERTYPE,
+    rc = core_l2_pqc_fragment(pkt, len, capacity, NE_L2_TCP_ETHERTYPE,
                               policy_id, core_id, key, out);
     memset(key, 0, sizeof(key));
     return rc;

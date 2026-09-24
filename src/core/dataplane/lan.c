@@ -6,8 +6,9 @@
 #include "../../../inc/dataplane/tx.h"
 #include <errno.h>
 
-int core_lan_process(const struct app_config *cfg, const uint8_t *pkt,
-    uint32_t len, uint8_t core_id, struct core_packet_batch *out)
+int core_lan_process(const struct app_config *cfg, uint8_t *pkt,
+    uint32_t len, uint32_t capacity, uint8_t core_id,
+    struct core_packet_batch *out)
 {
     const struct crypto_policy *policy;
     if (!pkt || !out || len < 34 || len > ETH_FRAME_MAX) return -EINVAL;
@@ -17,13 +18,17 @@ int core_lan_process(const struct app_config *cfg, const uint8_t *pkt,
     if (policy->id <= 0 || policy->id > 255) return -EINVAL;
     switch (pkt[23]) {
     case IPPROTO_TCP_VAL:
-        return core_tcp_handle_lan_wan(cfg, pkt, len, policy->id, core_id, out);
+        return core_tcp_handle_lan_wan(cfg, pkt, len, capacity,
+            policy->id, core_id, out);
     case IPPROTO_UDP_VAL:
-        return core_udp_handle_lan_wan(cfg, pkt, len, policy->id, core_id, out);
+        return core_udp_handle_lan_wan(cfg, pkt, len, capacity,
+            policy->id, core_id, out);
     case IPPROTO_ICMP_VAL:
-        return core_ping_handle_lan_wan(cfg, pkt, len, policy->id, core_id, out);
+        return core_ping_handle_lan_wan(cfg, pkt, len, capacity,
+            policy->id, core_id, out);
     case IPPROTO_OSPF_VAL:
-        return core_ospf_handle_lan_wan(cfg, pkt, len, policy->id, core_id, out);
+        return core_ospf_handle_lan_wan(cfg, pkt, len, capacity,
+            policy->id, core_id, out);
     default:
         return -EAFNOSUPPORT;
     }

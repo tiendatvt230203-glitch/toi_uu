@@ -195,7 +195,8 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
             job.tx_slot = worker_idx;
             return ne_ring_try_push(&rt->tx_pending[NE_DIR_WAN][worker_idx], &job);
         }
-        rc = core_lan_process(&rt->config, data, len, worker_idx, &batch);
+        rc = core_lan_process(&rt->config, data, len, sizeof(data),
+                              worker_idx, &batch);
         if (rc) return rc;
         ring = &rt->tx_pending[NE_DIR_WAN][tx];
         uint8_t wire[ETH_FRAME_MAX];
