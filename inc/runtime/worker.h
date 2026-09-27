@@ -8,7 +8,8 @@ void core_worker_stop_all(struct core_runtime *rt);
 int core_worker_pin_cpu(int cpu_id);
 int core_worker_select_encrypt_core(const uint8_t *pkt, uint32_t len);
 int core_worker_select_tx_core(const uint8_t *pkt, uint32_t len);
-int core_worker_select_decrypt_core(const uint8_t *pkt, uint32_t len);
+int core_worker_select_decrypt_core(struct ne_pair *pair,
+                                    const struct ne_packet *pkt);
 int core_worker_rx_submit(struct core_runtime *rt, const struct ne_packet *pkt);
 int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
                             int worker_idx);

@@ -166,10 +166,12 @@
 
 
 static const uint8_t CORE_CPU_RX_LAN[] = { 0u };
-static const uint8_t CORE_CPU_TX[] = { 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u };
+static const uint8_t CORE_CPU_TX[] = { 1u, 2u, 9u, 10u };
+static const uint8_t CORE_CPU_CRYPTO[] = { 3u, 4u, 5u, 6u, 7u, 8u };
 static const uint8_t CORE_CPU_RX_WAN[] = { 11u };
 
 #define CORE_TX_WORKERS ((uint32_t)(sizeof(CORE_CPU_TX) / sizeof(CORE_CPU_TX[0])))
+#define CORE_CRYPTO_WORKERS ((uint32_t)(sizeof(CORE_CPU_CRYPTO) / sizeof(CORE_CPU_CRYPTO[0])))
 
 enum policy_action {
     POLICY_ACTION_BYPASS = 0,
@@ -184,7 +186,8 @@ enum ne_packet_dir {
 enum core_worker_role {
     CORE_WORKER_LAN_RX = 1,
     CORE_WORKER_WAN_RX = 2,
-    CORE_WORKER_TX = 3
+    CORE_WORKER_CRYPTO = 3,
+    CORE_WORKER_TX = 4
 };
 
 struct crypto_policy {
@@ -283,21 +286,17 @@ struct ne_packet {
 };
 
 struct core_packet_batch {
-    uint8_t data[NE_PACKET_MAX_SEGMENTS][NE_FRAME_DATA_MAX];
-    uint32_t len[NE_PACKET_MAX_SEGMENTS];
-    uint8_t end_of_packet[NE_PACKET_MAX_SEGMENTS];
+    struct ne_packet packets[2];
     uint32_t count;
-    uint32_t packet_count;
 };
 
 struct core_fragment_slot {
     uint32_t id;
     uint16_t total;
     uint16_t received;
-    uint8_t ethernet[14];
     uint8_t core_id;
     uint8_t active;
-    uint8_t data[CORE_ENCRYPTED_FRAME_MAX];
+    struct ne_packet packet;
 };
 
 struct ne_ring {
@@ -369,9 +368,10 @@ struct core_runtime {
     pthread_rwlock_t config_lock;
     struct app_config config;
     struct ne_pair pair;
-    struct ne_ring rx_to_tx[2][CORE_TX_WORKERS];
+    struct ne_ring rx_to_crypto[2][CORE_CRYPTO_WORKERS];
     struct ne_ring tx_pending[2][CORE_TX_WORKERS];
     struct core_worker workers[sizeof(CORE_CPU_RX_LAN) / sizeof(CORE_CPU_RX_LAN[0]) +
+                               sizeof(CORE_CPU_CRYPTO) / sizeof(CORE_CPU_CRYPTO[0]) +
                                sizeof(CORE_CPU_TX) / sizeof(CORE_CPU_TX[0]) +
                                sizeof(CORE_CPU_RX_WAN) / sizeof(CORE_CPU_RX_WAN[0])];
     int worker_count;

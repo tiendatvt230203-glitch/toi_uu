@@ -29,8 +29,15 @@ void *ne_packet_data(struct ne_pair *p, uint64_t addr);
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out);
 void ne_frame_free(struct ne_pair *p, uint64_t addr);
 void ne_packet_free(struct ne_pair *p, const struct ne_packet *pkt);
-int ne_packet_copy(struct ne_pair *p, const struct ne_packet *pkt,
-                    uint8_t *out, uint32_t capacity);
-int ne_packet_store(struct ne_pair *p, const uint8_t *data, uint32_t len,
-                     struct ne_packet *pkt);
+uint8_t *ne_packet_at(struct ne_pair *p, const struct ne_packet *pkt,
+                      uint32_t offset, uint32_t *contiguous);
+int ne_packet_read(struct ne_pair *p, const struct ne_packet *pkt,
+                   uint32_t offset, void *out, uint32_t len);
+int ne_packet_append_alloc(struct ne_pair *p, struct ne_packet *pkt,
+                           uint32_t len, uint8_t **data_out);
+int ne_packet_trim_head(struct ne_pair *p, struct ne_packet *pkt,
+                        uint32_t len);
+int ne_packet_trim_tail(struct ne_pair *p, struct ne_packet *pkt,
+                        uint32_t len);
+int ne_packet_concat(struct ne_packet *first, struct ne_packet *second);
 #endif
