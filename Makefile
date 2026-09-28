@@ -2,7 +2,9 @@ CC     = gcc
 CLANG  = clang
 
 UNSAFE_FIXED_NONCE ?= 0
+SKIP_GCM_AUTH ?= 1
 CFLAGS = -D_GNU_SOURCE -DPQC_FIXED_TEST_KEY=1 -DPQC_UNSAFE_FIXED_NONCE=$(UNSAFE_FIXED_NONCE) \
+         -DPQC_UNSAFE_SKIP_GCM_AUTH=$(SKIP_GCM_AUTH) \
          -I. -Iinc -Isrc/db -I../include -Isrc/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
           ./lib/libxdp.so.1 -lbpf -lpq ./lib/libscrypt.so

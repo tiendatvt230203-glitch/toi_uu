@@ -156,6 +156,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#if defined(PQC_UNSAFE_SKIP_GCM_AUTH) && PQC_UNSAFE_SKIP_GCM_AUTH
+    fprintf(stderr, "[PQC-TEST] GCM authentication disabled on receive\n");
+#endif
+
     rc = daemon_run(&runtime);
 
     daemon_cleanup(&runtime);

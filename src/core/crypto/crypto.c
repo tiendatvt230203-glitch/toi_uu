@@ -53,10 +53,9 @@ static uint32_t jumbo_get32(const uint8_t *p)
 
 static uint64_t packet_fingerprint(struct ne_pair *pair,
                                    const struct ne_packet *pkt,
-                                   uint32_t bytes)
+                                   uint32_t offset, uint32_t bytes)
 {
     uint64_t hash = 1469598103934665603ULL;
-    uint32_t offset = 0;
     while (bytes) {
         uint32_t available;
         uint8_t *data = ne_packet_at(pair, pkt, offset, &available);
@@ -205,9 +204,19 @@ int core_l2_pqc_decrypt(struct ne_pair *pair, struct ne_packet *pkt,
         return -ENOMEM;
 
     uint32_t ciphertext_len = pkt->total_len - CORE_ETH_HEADER - CORE_META_NO_CORE;
+#if !defined(PQC_UNSAFE_SKIP_GCM_AUTH) || !PQC_UNSAFE_SKIP_GCM_AUTH
     word32 final = 0;
     uint8_t final_data[16];
     int rc = -EKEYREJECTED;
+#else
+    int rc = -EIO;
+#endif
+#if defined(PQC_UNSAFE_SKIP_GCM_AUTH) && PQC_UNSAFE_SKIP_GCM_AUTH
+    if (scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_GCM, key, 32,
+                         meta + 16, 12, SCRYPT_DECRYPTION) ||
+        cipher_update_packet(ctx, pair, pkt, CORE_ETH_HEADER, ciphertext_len))
+        goto done;
+#else
     if (scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_GCM, key, 32,
                          meta + 16, 12, SCRYPT_DECRYPTION) ||
         scrypt_CipherSetTagSize(ctx, 16) ||
@@ -216,6 +225,7 @@ int core_l2_pqc_decrypt(struct ne_pair *pair, struct ne_packet *pkt,
         cipher_update_packet(ctx, pair, pkt, CORE_ETH_HEADER, ciphertext_len) ||
         scrypt_CipherFinal(ctx, final_data, &final) || final != 0)
         goto done;
+#endif
 
     rc = ne_packet_trim_tail(pair, pkt, CORE_META_NO_CORE);
     if (!rc) {
@@ -344,12 +354,26 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     uint32_t id = atomic_fetch_add_explicit(&g_jumbo_id, 1,
                                              memory_order_relaxed);
     uint16_t total = (uint16_t)(logical_len - 15u);
-    if (!(id & 1023u))
-        fprintf(stderr, "5T:%u:%016llx:%u\n", id,
-                (unsigned long long)packet_fingerprint(pair, pkt,
-                                                       logical_len - 1u),
-                logical_len - 1u);
     uint16_t first_bytes = (uint16_t)(prefix_len - CORE_ETH_HEADER);
+    uint32_t encrypted_len = logical_len - 1u;
+    uint32_t ciphertext_len = encrypted_len - CORE_ETH_HEADER - CORE_META_NO_CORE;
+    if (!(id & 1023u))
+        fprintf(stderr,
+                "5T:%u:%u:%016llx:%016llx:%016llx:%016llx:%016llx\n",
+                id, encrypted_len,
+                (unsigned long long)packet_fingerprint(pair, pkt, 0,
+                                                       encrypted_len),
+                (unsigned long long)packet_fingerprint(pair, pkt, 0,
+                                                       CORE_ETH_HEADER),
+                (unsigned long long)packet_fingerprint(pair, pkt,
+                                                       CORE_ETH_HEADER,
+                                                       first_bytes),
+                (unsigned long long)packet_fingerprint(pair, pkt,
+                                                       CORE_ETH_HEADER + first_bytes,
+                                                       ciphertext_len - first_bytes),
+                (unsigned long long)packet_fingerprint(pair, pkt,
+                                                       CORE_ETH_HEADER + ciphertext_len,
+                                                       CORE_META_NO_CORE));
     uint16_t first_padding = (uint16_t)(CORE_JUMBO_DATA_MAX - first_bytes);
     uint8_t *shim0 = ne_packet_data(pair, shim_addr);
     memset(shim0, 0, first_padding);
@@ -514,10 +538,26 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
         return -EMSGSIZE;
     }
     if (!(id & 1023u))
-        fprintf(stderr, "5R:%u:%016llx:%u\n", id,
-                (unsigned long long)packet_fingerprint(pair, &slot->packet,
+        fprintf(stderr,
+                "5R:%u:%u:%016llx:%016llx:%016llx:%016llx:%016llx\n",
+                id, slot->packet.total_len,
+                (unsigned long long)packet_fingerprint(pair, &slot->packet, 0,
                                                        slot->packet.total_len),
-                slot->packet.total_len);
+                (unsigned long long)packet_fingerprint(pair, &slot->packet, 0,
+                                                       CORE_ETH_HEADER),
+                (unsigned long long)packet_fingerprint(pair, &slot->packet,
+                                                       CORE_ETH_HEADER,
+                                                       slot->received),
+                (unsigned long long)packet_fingerprint(pair, &slot->packet,
+                                                       CORE_ETH_HEADER + slot->received,
+                                                       slot->packet.total_len -
+                                                       CORE_ETH_HEADER -
+                                                       CORE_META_NO_CORE -
+                                                       slot->received),
+                (unsigned long long)packet_fingerprint(pair, &slot->packet,
+                                                       slot->packet.total_len -
+                                                       CORE_META_NO_CORE,
+                                                       CORE_META_NO_CORE));
     *pkt = slot->packet;
     memset(slot, 0, sizeof(*slot));
     return pkt->total_len == CORE_ETH_HEADER + total ? 0 : -EMSGSIZE;
