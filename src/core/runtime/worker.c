@@ -19,6 +19,30 @@ static uint64_t g_worker_load[CORE_CRYPTO_WORKERS];
 static pthread_mutex_t g_flow_route_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static atomic_uint_fast64_t g_pressure_log_second[4];
+static atomic_uint_fast64_t g_pipeline_log_second;
+static atomic_uint_fast64_t g_pipeline_count[6];
+
+static void pipeline_log(void)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seen = atomic_load_explicit(&g_pipeline_log_second,
+                                         memory_order_relaxed);
+    if (seen == now || !atomic_compare_exchange_strong_explicit(
+            &g_pipeline_log_second, &seen, now,
+            memory_order_relaxed, memory_order_relaxed))
+        return;
+    uint64_t count[6];
+    for (unsigned i = 0; i < 6; i++)
+        count[i] = atomic_exchange_explicit(&g_pipeline_count[i], 0,
+                                            memory_order_relaxed);
+    fprintf(stderr, "10:%llu:%llu:%llu:%llu:%llu:%llu\n",
+            (unsigned long long)count[0],
+            (unsigned long long)count[1],
+            (unsigned long long)count[2],
+            (unsigned long long)count[3],
+            (unsigned long long)count[4],
+            (unsigned long long)count[5]);
+}
 
 static void pressure_log(unsigned code)
 {
@@ -271,14 +295,21 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
         core_worker_select_decrypt_core(&rt->pair, pkt) != worker_idx)
         return -EXDEV;
     int rc = core_wan_process(&rt->config, &rt->pair, pkt);
+    atomic_fetch_add_explicit(&g_pipeline_count[2], 1,
+                              memory_order_relaxed);
     if (rc == 1)
         return 0;
     if (rc)
         return rc;
+    atomic_fetch_add_explicit(&g_pipeline_count[3], 1,
+                              memory_order_relaxed);
     pkt->dir = NE_DIR_LOCAL;
     pkt->local_idx = 0;
     pkt->tx_slot = tx_slot;
     rc = ne_ring_try_push(&rt->tx_pending[NE_DIR_LOCAL][tx_slot], pkt);
+    if (!rc)
+        atomic_fetch_add_explicit(&g_pipeline_count[4], 1,
+                                  memory_order_relaxed);
     if (rc == -ENOSPC)
         pressure_log(2);
     return rc;
@@ -299,6 +330,9 @@ int core_worker_tx_step(struct core_runtime *rt, int tx_slot)
         if (rc < 0)
             return rc;
         total += rc;
+        if (dir == NE_DIR_LOCAL && rc > 0)
+            atomic_fetch_add_explicit(&g_pipeline_count[5], (uint64_t)rc,
+                                      memory_order_relaxed);
     }
     return total;
 }
@@ -334,15 +368,24 @@ static void *core_worker_run(void *arg)
             struct ne_packet packets[NE_BATCH_SIZE];
             int count = ne_recv_slot(&rt->pair, dir, worker->slot,
                                      packets, NE_BATCH_SIZE);
+            if (dir == NE_DIR_WAN && count > 0)
+                atomic_fetch_add_explicit(&g_pipeline_count[0],
+                                          (uint64_t)count,
+                                          memory_order_relaxed);
             worked |= count > 0;
             for (int i = 0; i < count; i++) {
                 pthread_rwlock_rdlock(&rt->config_lock);
                 int rc = core_worker_rx_submit(rt, &packets[i]);
                 pthread_rwlock_unlock(&rt->config_lock);
+                if (!rc && dir == NE_DIR_WAN)
+                    atomic_fetch_add_explicit(&g_pipeline_count[1], 1,
+                                              memory_order_relaxed);
                 if (rc)
                     ne_packet_free(&rt->pair, &packets[i]);
             }
             worked |= ne_fill_slot(&rt->pair, dir, worker->slot) > 0;
+            if (dir == NE_DIR_WAN)
+                pipeline_log();
         }
         if (!worked)
             nanosleep(&idle, NULL);
