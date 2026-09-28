@@ -32,6 +32,18 @@ static void pressure_log(unsigned code)
         fprintf(stderr, "%u\n", code);
 }
 
+static void crypto_error_log(int rc)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seen = atomic_load_explicit(&g_pressure_log_second[3],
+                                         memory_order_relaxed);
+
+    if (seen != now && atomic_compare_exchange_strong_explicit(
+            &g_pressure_log_second[3], &seen, now,
+            memory_order_relaxed, memory_order_relaxed))
+        fprintf(stderr, "4:%d\n", rc);
+}
+
 int core_worker_pin_cpu(int cpu_id)
 {
     cpu_set_t cpus;
@@ -311,7 +323,7 @@ static void *core_worker_run(void *arg)
                     int rc = core_worker_crypto_step(rt, &packets[i], worker->slot);
                     pthread_rwlock_unlock(&rt->config_lock);
                     if (rc) {
-                        pressure_log(4);
+                        crypto_error_log(rc);
                         ne_packet_free(&rt->pair, &packets[i]);
                     }
                 }

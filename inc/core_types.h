@@ -312,7 +312,6 @@ struct ne_ring {
 
 struct ne_pool {
     uint64_t *buf;
-    atomic_uchar *refs;
     uint32_t cap;
     uint32_t mask;
     uint32_t head;

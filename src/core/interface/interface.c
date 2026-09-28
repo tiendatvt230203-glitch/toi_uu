@@ -179,53 +179,20 @@ int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out)
         pthread_spin_unlock(&p->pool.lock);
         return -ENOSPC;
     }
-    uint64_t base = p->pool.buf[p->pool.tail++ & p->pool.mask];
-    uint32_t frame = (uint32_t)(base / p->frame_size);
-    atomic_store_explicit(&p->pool.refs[frame], 1, memory_order_release);
-    *addr_out = base + NE_XDP_PACKET_HEADROOM;
+    *addr_out = p->pool.buf[p->pool.tail++ & p->pool.mask] +
+                NE_XDP_PACKET_HEADROOM;
     pthread_spin_unlock(&p->pool.lock);
     return 0;
 }
 
-int ne_frame_ref(struct ne_pair *p, uint64_t addr)
-{
-    if (!p || !p->pool.refs || addr >= p->bufsize)
-        return -EINVAL;
-    uint64_t base = addr & ~((uint64_t)p->frame_size - 1u);
-    uint32_t frame = (uint32_t)(base / p->frame_size);
-    unsigned char refs = atomic_load_explicit(&p->pool.refs[frame],
-                                               memory_order_acquire);
-    while (refs) {
-        if (refs == UCHAR_MAX)
-            return -EOVERFLOW;
-        if (atomic_compare_exchange_weak_explicit(
-                &p->pool.refs[frame], &refs, (unsigned char)(refs + 1u),
-                memory_order_acq_rel, memory_order_acquire))
-            return 0;
-    }
-    return -EINVAL;
-}
-
 void ne_frame_free(struct ne_pair *p, uint64_t addr)
 {
-    if (!p || !p->pool.refs || addr >= p->bufsize)
+    if (!p || addr >= p->bufsize)
         return;
-    uint64_t base = addr & ~((uint64_t)p->frame_size - 1u);
-    uint32_t frame = (uint32_t)(base / p->frame_size);
-    unsigned char refs = atomic_load_explicit(&p->pool.refs[frame],
-                                               memory_order_acquire);
-    while (refs) {
-        if (!atomic_compare_exchange_weak_explicit(
-                &p->pool.refs[frame], &refs, (unsigned char)(refs - 1u),
-                memory_order_acq_rel, memory_order_acquire))
-            continue;
-        if (refs != 1u)
-            return;
-        pthread_spin_lock(&p->pool.lock);
-        p->pool.buf[p->pool.head++ & p->pool.mask] = base;
-        pthread_spin_unlock(&p->pool.lock);
-        return;
-    }
+    pthread_spin_lock(&p->pool.lock);
+    p->pool.buf[p->pool.head++ & p->pool.mask] =
+        addr & ~((uint64_t)p->frame_size - 1u);
+    pthread_spin_unlock(&p->pool.lock);
 }
 
 void *ne_packet_data(struct ne_pair *p, uint64_t addr)
@@ -471,20 +438,15 @@ int ne_pair_open(struct ne_pair *p, struct app_config *cfg)
         else cfg->locals[0].queue_count = n;
     }
     p->pool.buf = calloc(p->n_frames, sizeof(uint64_t));
-    p->pool.refs = calloc(p->n_frames, sizeof(*p->pool.refs));
-    if (!p->pool.buf || !p->pool.refs) {
-        free(p->pool.refs);
+    if (!p->pool.buf) {
         free(p->pool.buf);
-        p->pool.refs = NULL;
         p->pool.buf = NULL;
         rc = -ENOMEM;
         goto fail;
     }
     rc = pthread_spin_init(&p->pool.lock, PTHREAD_PROCESS_PRIVATE);
     if (rc) {
-        free(p->pool.refs);
         free(p->pool.buf);
-        p->pool.refs = NULL;
         p->pool.buf = NULL;
         rc = -rc;
         goto fail;
@@ -561,7 +523,6 @@ void ne_pair_close(struct ne_pair *p, const struct app_config *cfg)
     if (p->bufs) munmap(p->bufs, p->bufsize);
     if (p->pool.buf) {
         pthread_spin_destroy(&p->pool.lock);
-        free(p->pool.refs);
         free(p->pool.buf);
     }
     (void)interface_set_queue_count(p->config->locals[0].ifname, 12u);

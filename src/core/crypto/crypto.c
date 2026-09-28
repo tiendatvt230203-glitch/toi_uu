@@ -259,7 +259,7 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     second->total_len = CORE_ETH_HEADER;
 
     uint32_t position = 0;
-    uint64_t shared_addr = 0;
+    uint64_t boundary_addr = 0;
     for (unsigned i = 0; i < original_segments; i++) {
         uint32_t length = pkt->segment_len[i];
         uint32_t end = position + length;
@@ -277,19 +277,30 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
             uint32_t right = length - left;
             if (first->segment_count >= NE_PACKET_MAX_SEGMENTS - 1u ||
                 second->segment_count >= NE_PACKET_MAX_SEGMENTS - 1u ||
-                ne_frame_ref(pair, pkt->segment_addr[i])) {
+                right > NE_FRAME_DATA_MAX ||
+                ne_frame_alloc(pair, &boundary_addr)) {
                 ne_frame_free(pair, header_addr);
                 ne_frame_free(pair, shim_addr);
                 memset(first, 0, sizeof(*first));
                 memset(second, 0, sizeof(*second));
                 return -EMSGSIZE;
             }
-            shared_addr = pkt->segment_addr[i];
             first->segment_addr[first->segment_count] = pkt->segment_addr[i];
             first->segment_len[first->segment_count++] = left;
             first->total_len += left;
-            second->segment_addr[second->segment_count] =
-                pkt->segment_addr[i] + left;
+            uint8_t *source = ne_packet_data(pair, pkt->segment_addr[i]);
+            uint8_t *boundary = ne_packet_data(pair, boundary_addr);
+            if (!source || !boundary) {
+                ne_frame_free(pair, boundary_addr);
+                boundary_addr = 0;
+                ne_frame_free(pair, header_addr);
+                ne_frame_free(pair, shim_addr);
+                memset(first, 0, sizeof(*first));
+                memset(second, 0, sizeof(*second));
+                return -EFAULT;
+            }
+            memcpy(boundary, source + left, right);
+            second->segment_addr[second->segment_count] = boundary_addr;
             second->segment_len[second->segment_count++] = right;
             second->total_len += right;
         }
@@ -300,8 +311,8 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
         second->segment_count >= NE_PACKET_MAX_SEGMENTS) {
         ne_frame_free(pair, header_addr);
         ne_frame_free(pair, shim_addr);
-        if (shared_addr)
-            ne_frame_free(pair, shared_addr);
+        if (boundary_addr)
+            ne_frame_free(pair, boundary_addr);
         memset(first, 0, sizeof(*first));
         memset(second, 0, sizeof(*second));
         return -EMSGSIZE;
@@ -311,8 +322,10 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
                                              memory_order_relaxed);
     uint16_t total = (uint16_t)(logical_len - 15u);
     uint16_t first_bytes = (uint16_t)(prefix_len - CORE_ETH_HEADER);
+    uint16_t first_padding = (uint16_t)(CORE_JUMBO_DATA_MAX - first_bytes);
     uint8_t *shim0 = ne_packet_data(pair, shim_addr);
-    jumbo_make(shim0, id, total, 0, first_bytes, 0, core);
+    memset(shim0, 0, first_padding);
+    jumbo_make(shim0 + first_padding, id, total, 0, first_bytes, 0, core);
 
     uint8_t *tail = ne_packet_data(pair,
         pkt->segment_addr[pkt->segment_count - 1u]);
@@ -322,8 +335,8 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
         CORE_META_NO_CORE + CORE_JUMBO_HEADER_SIZE;
 
     first->segment_addr[first->segment_count] = shim_addr;
-    first->segment_len[first->segment_count++] = CORE_JUMBO_HEADER_SIZE;
-    first->total_len += CORE_JUMBO_HEADER_SIZE;
+    first->segment_len[first->segment_count++] = first_padding + CORE_JUMBO_HEADER_SIZE;
+    first->total_len += first_padding + CORE_JUMBO_HEADER_SIZE;
 
     unsigned meta = pkt->segment_count - 1u;
     second->segment_addr[second->segment_count] = pkt->segment_addr[meta];
@@ -332,7 +345,7 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
 
     if (first->total_len > ETH_FRAME_MAX ||
         second->total_len > ETH_FRAME_MAX ||
-        first->total_len != prefix_len + CORE_JUMBO_HEADER_SIZE ||
+        first->total_len != ETH_FRAME_MAX ||
         second->total_len != CORE_ETH_HEADER +
             (uint32_t)(total - first_bytes) + CORE_JUMBO_HEADER_SIZE) {
         ne_packet_free(pair, first);
@@ -405,8 +418,14 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
     uint16_t bytes = jumbo_get16(shim + 12);
     uint8_t index = shim[14];
     core &= CORE_JUMBO_CORE_MASK;
-    if (!bytes || (uint32_t)offset + bytes > total ||
-        pkt->total_len != CORE_ETH_HEADER + bytes + CORE_JUMBO_HEADER_SIZE)
+    if (!bytes || (uint32_t)offset + bytes > total)
+        return -EBADMSG;
+    uint32_t minimum_len = CORE_ETH_HEADER + bytes + CORE_JUMBO_HEADER_SIZE;
+    if (pkt->total_len < minimum_len ||
+        (index && pkt->total_len != minimum_len))
+        return -EBADMSG;
+    uint32_t padding = pkt->total_len - minimum_len;
+    if (padding > CORE_JUMBO_DATA_MAX - bytes)
         return -EBADMSG;
 
     if (!g_jumbo_slots) {
@@ -437,6 +456,8 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
             return -EBADMSG;
         }
         if (ne_packet_trim_tail(pair, pkt, CORE_JUMBO_HEADER_SIZE))
+            return -EBADMSG;
+        if (padding && ne_packet_trim_tail(pair, pkt, padding))
             return -EBADMSG;
         slot->id = id;
         slot->total = total;

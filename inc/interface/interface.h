@@ -27,7 +27,6 @@ int ne_cq_drain_slot(struct ne_pair *p, enum ne_packet_dir dir, int tx_slot);
 
 void *ne_packet_data(struct ne_pair *p, uint64_t addr);
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out);
-int ne_frame_ref(struct ne_pair *p, uint64_t addr);
 void ne_frame_free(struct ne_pair *p, uint64_t addr);
 void ne_packet_free(struct ne_pair *p, const struct ne_packet *pkt);
 uint8_t *ne_packet_at(struct ne_pair *p, const struct ne_packet *pkt,
