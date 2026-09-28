@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <sched.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -16,6 +17,20 @@ static struct core_flow_route
     g_flow_routes[CORE_FLOW_ROUTE_SETS][CORE_FLOW_ROUTE_WAYS];
 static uint64_t g_worker_load[CORE_CRYPTO_WORKERS];
 static pthread_mutex_t g_flow_route_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static atomic_uint_fast64_t g_pressure_log_second[4];
+
+static void pressure_log(unsigned code)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seen = atomic_load_explicit(&g_pressure_log_second[code - 1u],
+                                         memory_order_relaxed);
+
+    if (seen != now && atomic_compare_exchange_strong_explicit(
+            &g_pressure_log_second[code - 1u], &seen, now,
+            memory_order_relaxed, memory_order_relaxed))
+        fprintf(stderr, "%u\n", code);
+}
 
 int core_worker_pin_cpu(int cpu_id)
 {
@@ -168,7 +183,10 @@ int core_worker_rx_submit(struct core_runtime *rt, const struct ne_packet *pkt)
     }
     if (worker < 0)
         return worker;
-    return ne_ring_try_push(&rt->rx_to_crypto[pkt->dir][worker], pkt);
+    int rc = ne_ring_try_push(&rt->rx_to_crypto[pkt->dir][worker], pkt);
+    if (rc == -ENOSPC)
+        pressure_log(1);
+    return rc;
 }
 
 static int push_crypto_batch(struct core_runtime *rt,
@@ -187,6 +205,8 @@ static int push_crypto_batch(struct core_runtime *rt,
     int rc = batch->count == 2
         ? ne_ring_try_push_pair(ring, &batch->packets[0], &batch->packets[1])
         : ne_ring_try_push(ring, &batch->packets[0]);
+    if (rc == -ENOSPC)
+        pressure_log(2);
     if (rc)
         for (unsigned i = 0; i < batch->count; i++)
             ne_packet_free(&rt->pair, &batch->packets[i]);
@@ -219,7 +239,10 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
             pkt->dir = NE_DIR_WAN;
             pkt->wan_idx = wan_idx;
             pkt->tx_slot = tx_slot;
-            return ne_ring_try_push(&rt->tx_pending[NE_DIR_WAN][tx_slot], pkt);
+            rc = ne_ring_try_push(&rt->tx_pending[NE_DIR_WAN][tx_slot], pkt);
+            if (rc == -ENOSPC)
+                pressure_log(2);
+            return rc;
         }
         struct core_packet_batch batch;
         int rc = core_lan_process(&rt->config, &rt->pair, pkt,
@@ -243,7 +266,10 @@ int core_worker_crypto_step(struct core_runtime *rt, struct ne_packet *pkt,
     pkt->dir = NE_DIR_LOCAL;
     pkt->local_idx = 0;
     pkt->tx_slot = tx_slot;
-    return ne_ring_try_push(&rt->tx_pending[NE_DIR_LOCAL][tx_slot], pkt);
+    rc = ne_ring_try_push(&rt->tx_pending[NE_DIR_LOCAL][tx_slot], pkt);
+    if (rc == -ENOSPC)
+        pressure_log(2);
+    return rc;
 }
 
 int core_worker_tx_step(struct core_runtime *rt, int tx_slot)
@@ -284,8 +310,10 @@ static void *core_worker_run(void *arg)
                     pthread_rwlock_rdlock(&rt->config_lock);
                     int rc = core_worker_crypto_step(rt, &packets[i], worker->slot);
                     pthread_rwlock_unlock(&rt->config_lock);
-                    if (rc)
+                    if (rc) {
+                        pressure_log(4);
                         ne_packet_free(&rt->pair, &packets[i]);
+                    }
                 }
             }
         } else {

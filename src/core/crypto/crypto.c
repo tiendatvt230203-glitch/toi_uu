@@ -224,32 +224,18 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
         return 0;
     }
 
-    if (pkt->segment_count < 3)
+    if (pkt->segment_count < 2)
         return -EMSGSIZE;
 
     uint32_t logical_len = pkt->total_len;
     uint32_t original_len = logical_len - CORE_META_WITH_CORE;
     unsigned original_segments = pkt->segment_count - 1u;
-    uint32_t prefix_len = 0;
-    unsigned split = 0;
-    for (unsigned i = 0; i + 1u < original_segments; i++) {
-        uint32_t candidate = prefix_len + pkt->segment_len[i];
-        uint32_t suffix = original_len - candidate;
-        if (candidate + CORE_JUMBO_HEADER_SIZE <= ETH_FRAME_MAX &&
-            CORE_ETH_HEADER + suffix + CORE_META_NO_CORE +
-                CORE_JUMBO_HEADER_SIZE <= ETH_FRAME_MAX) {
-            prefix_len = candidate;
-            split = i + 1u;
-        } else {
-            prefix_len = candidate;
-        }
-    }
-    if (!split)
+    uint32_t prefix_len = CORE_ETH_HEADER + CORE_JUMBO_DATA_MAX;
+    if (prefix_len > original_len)
+        prefix_len = original_len;
+    if (prefix_len <= CORE_ETH_HEADER ||
+        logical_len - 15u > UINT16_MAX)
         return -EMSGSIZE;
-
-    prefix_len = 0;
-    for (unsigned i = 0; i < split; i++)
-        prefix_len += pkt->segment_len[i];
 
     uint64_t shim_addr, header_addr;
     if (ne_frame_alloc(pair, &shim_addr))
@@ -262,6 +248,64 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     uint8_t *header = ne_packet_data(pair, header_addr);
     uint8_t *first_header = ne_packet_data(pair, pkt->segment_addr[0]);
     memcpy(header, first_header, CORE_ETH_HEADER);
+
+    struct ne_packet *first = &out->packets[0];
+    struct ne_packet *second = &out->packets[1];
+    memset(first, 0, sizeof(*first));
+    memset(second, 0, sizeof(*second));
+
+    second->segment_addr[second->segment_count] = header_addr;
+    second->segment_len[second->segment_count++] = CORE_ETH_HEADER;
+    second->total_len = CORE_ETH_HEADER;
+
+    uint32_t position = 0;
+    uint64_t shared_addr = 0;
+    for (unsigned i = 0; i < original_segments; i++) {
+        uint32_t length = pkt->segment_len[i];
+        uint32_t end = position + length;
+
+        if (end <= prefix_len) {
+            first->segment_addr[first->segment_count] = pkt->segment_addr[i];
+            first->segment_len[first->segment_count++] = length;
+            first->total_len += length;
+        } else if (position >= prefix_len) {
+            second->segment_addr[second->segment_count] = pkt->segment_addr[i];
+            second->segment_len[second->segment_count++] = length;
+            second->total_len += length;
+        } else {
+            uint32_t left = prefix_len - position;
+            uint32_t right = length - left;
+            if (first->segment_count >= NE_PACKET_MAX_SEGMENTS - 1u ||
+                second->segment_count >= NE_PACKET_MAX_SEGMENTS - 1u ||
+                ne_frame_ref(pair, pkt->segment_addr[i])) {
+                ne_frame_free(pair, header_addr);
+                ne_frame_free(pair, shim_addr);
+                memset(first, 0, sizeof(*first));
+                memset(second, 0, sizeof(*second));
+                return -EMSGSIZE;
+            }
+            shared_addr = pkt->segment_addr[i];
+            first->segment_addr[first->segment_count] = pkt->segment_addr[i];
+            first->segment_len[first->segment_count++] = left;
+            first->total_len += left;
+            second->segment_addr[second->segment_count] =
+                pkt->segment_addr[i] + left;
+            second->segment_len[second->segment_count++] = right;
+            second->total_len += right;
+        }
+        position = end;
+    }
+    if (position != original_len || first->total_len != prefix_len ||
+        first->segment_count >= NE_PACKET_MAX_SEGMENTS ||
+        second->segment_count >= NE_PACKET_MAX_SEGMENTS) {
+        ne_frame_free(pair, header_addr);
+        ne_frame_free(pair, shim_addr);
+        if (shared_addr)
+            ne_frame_free(pair, shared_addr);
+        memset(first, 0, sizeof(*first));
+        memset(second, 0, sizeof(*second));
+        return -EMSGSIZE;
+    }
 
     uint32_t id = atomic_fetch_add_explicit(&g_jumbo_id, 1,
                                              memory_order_relaxed);
@@ -277,26 +321,26 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     pkt->segment_len[pkt->segment_count - 1u] =
         CORE_META_NO_CORE + CORE_JUMBO_HEADER_SIZE;
 
-    struct ne_packet *first = &out->packets[0];
-    struct ne_packet *second = &out->packets[1];
-    memset(first, 0, sizeof(*first));
-    memset(second, 0, sizeof(*second));
-
-    for (unsigned i = 0; i < split; i++) {
-        first->segment_addr[first->segment_count] = pkt->segment_addr[i];
-        first->segment_len[first->segment_count++] = pkt->segment_len[i];
-    }
     first->segment_addr[first->segment_count] = shim_addr;
     first->segment_len[first->segment_count++] = CORE_JUMBO_HEADER_SIZE;
-    first->total_len = prefix_len + CORE_JUMBO_HEADER_SIZE;
+    first->total_len += CORE_JUMBO_HEADER_SIZE;
 
-    second->segment_addr[second->segment_count] = header_addr;
-    second->segment_len[second->segment_count++] = CORE_ETH_HEADER;
-    second->total_len = CORE_ETH_HEADER;
-    for (unsigned i = split; i < pkt->segment_count; i++) {
-        second->segment_addr[second->segment_count] = pkt->segment_addr[i];
-        second->segment_len[second->segment_count++] = pkt->segment_len[i];
-        second->total_len += pkt->segment_len[i];
+    unsigned meta = pkt->segment_count - 1u;
+    second->segment_addr[second->segment_count] = pkt->segment_addr[meta];
+    second->segment_len[second->segment_count++] = pkt->segment_len[meta];
+    second->total_len += pkt->segment_len[meta];
+
+    if (first->total_len > ETH_FRAME_MAX ||
+        second->total_len > ETH_FRAME_MAX ||
+        first->total_len != prefix_len + CORE_JUMBO_HEADER_SIZE ||
+        second->total_len != CORE_ETH_HEADER +
+            (uint32_t)(total - first_bytes) + CORE_JUMBO_HEADER_SIZE) {
+        ne_packet_free(pair, first);
+        ne_packet_free(pair, second);
+        memset(first, 0, sizeof(*first));
+        memset(second, 0, sizeof(*second));
+        memset(pkt, 0, sizeof(*pkt));
+        return -EMSGSIZE;
     }
 
     first->dir = second->dir = pkt->dir;

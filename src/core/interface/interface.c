@@ -1,6 +1,7 @@
 #include "../../../inc/interface/interface.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -9,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <time.h>
 #include <linux/ethtool.h>
 #include <linux/if_link.h>
 #include <linux/sockios.h>
@@ -142,6 +144,34 @@ static struct ne_xsk_queue *pair_queues(struct ne_pair *p, int dir, int *count)
     return p->config->wans[0].queues;
 }
 
+static atomic_uint_fast64_t g_fq_log_second;
+
+static void fq_pressure_log(void)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seen = atomic_load_explicit(&g_fq_log_second,
+                                         memory_order_relaxed);
+
+    if (seen != now && atomic_compare_exchange_strong_explicit(
+            &g_fq_log_second, &seen, now,
+            memory_order_relaxed, memory_order_relaxed))
+        fprintf(stderr, "3\n");
+}
+
+static atomic_uint_fast64_t g_tx_log_second;
+
+static void tx_pressure_log(void)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seen = atomic_load_explicit(&g_tx_log_second,
+                                         memory_order_relaxed);
+
+    if (seen != now && atomic_compare_exchange_strong_explicit(
+            &g_tx_log_second, &seen, now,
+            memory_order_relaxed, memory_order_relaxed))
+        fprintf(stderr, "2\n");
+}
+
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out)
 {
     pthread_spin_lock(&p->pool.lock);
@@ -149,16 +179,53 @@ int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out)
         pthread_spin_unlock(&p->pool.lock);
         return -ENOSPC;
     }
-    *addr_out = p->pool.buf[p->pool.tail++ & p->pool.mask] + NE_XDP_PACKET_HEADROOM;
+    uint64_t base = p->pool.buf[p->pool.tail++ & p->pool.mask];
+    uint32_t frame = (uint32_t)(base / p->frame_size);
+    atomic_store_explicit(&p->pool.refs[frame], 1, memory_order_release);
+    *addr_out = base + NE_XDP_PACKET_HEADROOM;
     pthread_spin_unlock(&p->pool.lock);
     return 0;
 }
 
+int ne_frame_ref(struct ne_pair *p, uint64_t addr)
+{
+    if (!p || !p->pool.refs || addr >= p->bufsize)
+        return -EINVAL;
+    uint64_t base = addr & ~((uint64_t)p->frame_size - 1u);
+    uint32_t frame = (uint32_t)(base / p->frame_size);
+    unsigned char refs = atomic_load_explicit(&p->pool.refs[frame],
+                                               memory_order_acquire);
+    while (refs) {
+        if (refs == UCHAR_MAX)
+            return -EOVERFLOW;
+        if (atomic_compare_exchange_weak_explicit(
+                &p->pool.refs[frame], &refs, (unsigned char)(refs + 1u),
+                memory_order_acq_rel, memory_order_acquire))
+            return 0;
+    }
+    return -EINVAL;
+}
+
 void ne_frame_free(struct ne_pair *p, uint64_t addr)
 {
-    pthread_spin_lock(&p->pool.lock);
-    p->pool.buf[p->pool.head++ & p->pool.mask] = addr & ~((uint64_t)p->frame_size - 1u);
-    pthread_spin_unlock(&p->pool.lock);
+    if (!p || !p->pool.refs || addr >= p->bufsize)
+        return;
+    uint64_t base = addr & ~((uint64_t)p->frame_size - 1u);
+    uint32_t frame = (uint32_t)(base / p->frame_size);
+    unsigned char refs = atomic_load_explicit(&p->pool.refs[frame],
+                                               memory_order_acquire);
+    while (refs) {
+        if (!atomic_compare_exchange_weak_explicit(
+                &p->pool.refs[frame], &refs, (unsigned char)(refs - 1u),
+                memory_order_acq_rel, memory_order_acquire))
+            continue;
+        if (refs != 1u)
+            return;
+        pthread_spin_lock(&p->pool.lock);
+        p->pool.buf[p->pool.head++ & p->pool.mask] = base;
+        pthread_spin_unlock(&p->pool.lock);
+        return;
+    }
 }
 
 void *ne_packet_data(struct ne_pair *p, uint64_t addr)
@@ -404,13 +471,20 @@ int ne_pair_open(struct ne_pair *p, struct app_config *cfg)
         else cfg->locals[0].queue_count = n;
     }
     p->pool.buf = calloc(p->n_frames, sizeof(uint64_t));
-    if (!p->pool.buf) {
+    p->pool.refs = calloc(p->n_frames, sizeof(*p->pool.refs));
+    if (!p->pool.buf || !p->pool.refs) {
+        free(p->pool.refs);
+        free(p->pool.buf);
+        p->pool.refs = NULL;
+        p->pool.buf = NULL;
         rc = -ENOMEM;
         goto fail;
     }
     rc = pthread_spin_init(&p->pool.lock, PTHREAD_PROCESS_PRIVATE);
     if (rc) {
+        free(p->pool.refs);
         free(p->pool.buf);
+        p->pool.refs = NULL;
         p->pool.buf = NULL;
         rc = -rc;
         goto fail;
@@ -485,7 +559,11 @@ void ne_pair_close(struct ne_pair *p, const struct app_config *cfg)
         }
     if (p->umem) xsk_umem__delete(p->umem);
     if (p->bufs) munmap(p->bufs, p->bufsize);
-    if (p->pool.buf) { pthread_spin_destroy(&p->pool.lock); free(p->pool.buf); }
+    if (p->pool.buf) {
+        pthread_spin_destroy(&p->pool.lock);
+        free(p->pool.refs);
+        free(p->pool.buf);
+    }
     (void)interface_set_queue_count(p->config->locals[0].ifname, 12u);
     (void)interface_set_queue_count(p->config->wans[0].ifname, 12u);
     p->config->locals[0].queue_count = queue_count(p->config->locals[0].ifname);
@@ -505,10 +583,15 @@ int ne_fill_slot(struct ne_pair *p, enum ne_packet_dir dir, int rx_slot)
             uint32_t free_slots = xsk_prod_nb_free(&slot->fq, slot->fq.size);
             if (slot->fq.size - free_slots >= NE_FQ_PREFILL) break;
             uint64_t addr;
-            if (ne_frame_alloc(p, &addr)) break;
+            if (ne_frame_alloc(p, &addr)) {
+                fq_pressure_log();
+                break;
+            }
             uint32_t idx;
             if (xsk_ring_prod__reserve(&slot->fq, 1, &idx) != 1) {
-                ne_frame_free(p, addr); break;
+                ne_frame_free(p, addr);
+                fq_pressure_log();
+                break;
             }
             *xsk_ring_prod__fill_addr(&slot->fq, idx) = addr - NE_XDP_PACKET_HEADROOM;
             xsk_ring_prod__submit(&slot->fq, 1);
@@ -593,7 +676,10 @@ int ne_tx_drain_all(struct ne_pair *p, enum ne_packet_dir dir,
                 needed += pkt->segment_count ? pkt->segment_count : 1;
             }
             uint32_t idx;
-            if (xsk_ring_prod__reserve(&slot->tx, needed, &idx) != needed) break;
+            if (xsk_ring_prod__reserve(&slot->tx, needed, &idx) != needed) {
+                tx_pressure_log();
+                break;
+            }
             unsigned written = 0;
             for (unsigned j = 0; j < group; j++) {
                 struct ne_packet *pkt = &ring->buf[(tail+j) & ring->mask];
