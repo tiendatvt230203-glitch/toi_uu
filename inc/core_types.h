@@ -283,6 +283,7 @@ struct ne_packet {
     uint8_t wan_idx;
     uint8_t local_idx;
     uint8_t tx_slot;
+    uint8_t tx_compacted;
 };
 
 struct core_packet_batch {

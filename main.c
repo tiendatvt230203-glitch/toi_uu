@@ -162,6 +162,9 @@ int main(int argc, char **argv)
 #if defined(PQC_DIAG_COPY_RX_TX) && PQC_DIAG_COPY_RX_TX
     fprintf(stderr, "[PQC-DIAG] RX payload copied before cross-interface TX\n");
 #endif
+#if defined(PQC_DIAG_COPY_ALL_TX) && PQC_DIAG_COPY_ALL_TX
+    fprintf(stderr, "[PQC-DIAG] all TX packets compacted into fresh UMEM frames\n");
+#endif
 
     rc = daemon_run(&runtime);
 

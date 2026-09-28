@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define CORE_META_WITH_CORE 30u
 #define CORE_META_NO_CORE 29u
@@ -19,7 +20,20 @@
 static pthread_once_t g_cipher_once = PTHREAD_ONCE_INIT;
 static int g_cipher_ready;
 static atomic_uint g_jumbo_id = 1;
+static atomic_uint_fast64_t g_reassembly_log_second;
 static _Thread_local struct core_fragment_slot *g_jumbo_slots;
+
+static void reassembly_order_log(unsigned reason, uint32_t id,
+                                 uint8_t index)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seen = atomic_load_explicit(&g_reassembly_log_second,
+                                         memory_order_relaxed);
+    if (seen != now && atomic_compare_exchange_strong_explicit(
+            &g_reassembly_log_second, &seen, now,
+            memory_order_relaxed, memory_order_relaxed))
+        fprintf(stderr, "7:%u:%u:%u\n", reason, id, index);
+}
 
 static void core_cipher_init(void)
 {
@@ -70,6 +84,27 @@ static uint64_t packet_fingerprint(struct ne_pair *pair,
         bytes -= take;
     }
     return hash;
+}
+
+static int packet_fingerprint_add(struct ne_pair *pair,
+                                  const struct ne_packet *pkt,
+                                  uint32_t offset, uint32_t bytes,
+                                  uint64_t *hash)
+{
+    while (bytes) {
+        uint32_t available;
+        uint8_t *data = ne_packet_at(pair, pkt, offset, &available);
+        if (!data)
+            return -EMSGSIZE;
+        uint32_t take = available < bytes ? available : bytes;
+        for (uint32_t i = 0; i < take; i++) {
+            *hash ^= data[i];
+            *hash *= 1099511628211ULL;
+        }
+        offset += take;
+        bytes -= take;
+    }
+    return 0;
 }
 
 static void jumbo_make(uint8_t shim[CORE_JUMBO_HEADER_SIZE], uint32_t id,
@@ -396,27 +431,56 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     uint16_t first_bytes = (uint16_t)(prefix_len - CORE_ETH_HEADER);
     uint32_t encrypted_len = logical_len - 1u;
     uint32_t ciphertext_len = encrypted_len - CORE_ETH_HEADER - CORE_META_NO_CORE;
-    if (!(id & 1023u))
+    uint32_t remainder_bytes = ciphertext_len - first_bytes;
+    uint64_t wire_hash = 1469598103934665603ULL;
+    if (!(id & 1023u)) {
+        packet_fingerprint_add(pair, first, 0,
+                               CORE_ETH_HEADER + first_bytes, &wire_hash);
+        packet_fingerprint_add(pair, second, CORE_ETH_HEADER,
+                               remainder_bytes + CORE_META_NO_CORE, &wire_hash);
         fprintf(stderr,
                 "5T:%u:%u:%016llx:%016llx:%016llx:%016llx:%016llx\n",
                 id, encrypted_len,
-                (unsigned long long)packet_fingerprint(pair, pkt, 0,
-                                                       encrypted_len),
-                (unsigned long long)packet_fingerprint(pair, pkt, 0,
+                (unsigned long long)wire_hash,
+                (unsigned long long)packet_fingerprint(pair, first, 0,
                                                        CORE_ETH_HEADER),
-                (unsigned long long)packet_fingerprint(pair, pkt,
+                (unsigned long long)packet_fingerprint(pair, first,
                                                        CORE_ETH_HEADER,
                                                        first_bytes),
-                (unsigned long long)packet_fingerprint(pair, pkt,
-                                                       CORE_ETH_HEADER + first_bytes,
-                                                       ciphertext_len - first_bytes),
-                (unsigned long long)packet_fingerprint(pair, pkt,
-                                                       CORE_ETH_HEADER + ciphertext_len,
+                (unsigned long long)packet_fingerprint(pair, second,
+                                                       CORE_ETH_HEADER,
+                                                       remainder_bytes),
+                (unsigned long long)packet_fingerprint(pair, second,
+                                                       CORE_ETH_HEADER +
+                                                       remainder_bytes,
                                                        CORE_META_NO_CORE));
+    }
     uint16_t first_padding = (uint16_t)(CORE_JUMBO_DATA_MAX - first_bytes);
+#if defined(PQC_DIAG_COPY_RX_TX) && PQC_DIAG_COPY_RX_TX
+    unsigned first_tail = first->segment_count - 1u;
+    uint8_t *shim0 = ne_packet_data(
+        pair, first->segment_addr[first_tail] + first->segment_len[first_tail]);
+    if (!shim0 || first->segment_len[first_tail] + first_padding +
+        CORE_JUMBO_HEADER_SIZE > NE_FRAME_DATA_MAX) {
+        ne_packet_free(pair, first);
+        ne_packet_free(pair, second);
+        ne_frame_free(pair, shim_addr);
+        memset(first, 0, sizeof(*first));
+        memset(second, 0, sizeof(*second));
+        memset(pkt, 0, sizeof(*pkt));
+        return -EMSGSIZE;
+    }
+    memset(shim0, 0, first_padding);
+    jumbo_make(shim0 + first_padding, id, total, 0, first_bytes, 0, core);
+    first->segment_len[first_tail] += first_padding + CORE_JUMBO_HEADER_SIZE;
+    first->total_len += first_padding + CORE_JUMBO_HEADER_SIZE;
+    ne_frame_free(pair, shim_addr);
+    shim_addr = 0;
+#else
     uint8_t *shim0 = ne_packet_data(pair, shim_addr);
     memset(shim0, 0, first_padding);
     jumbo_make(shim0 + first_padding, id, total, 0, first_bytes, 0, core);
+#endif
 
     uint8_t *tail = ne_packet_data(pair,
         pkt->segment_addr[pkt->segment_count - 1u]);
@@ -425,9 +489,11 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     pkt->segment_len[pkt->segment_count - 1u] =
         CORE_META_NO_CORE + CORE_JUMBO_HEADER_SIZE;
 
+#if !defined(PQC_DIAG_COPY_RX_TX) || !PQC_DIAG_COPY_RX_TX
     first->segment_addr[first->segment_count] = shim_addr;
     first->segment_len[first->segment_count++] = first_padding + CORE_JUMBO_HEADER_SIZE;
     first->total_len += first_padding + CORE_JUMBO_HEADER_SIZE;
+#endif
 
     unsigned meta = pkt->segment_count - 1u;
     second->segment_addr[second->segment_count] = pkt->segment_addr[meta];
@@ -527,12 +593,15 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
 
     struct core_fragment_slot *slot = &g_jumbo_slots[id % CORE_JUMBO_SLOTS];
     if (slot->active == 2) {
-        if (slot->id == id)
+        if (slot->id == id) {
+            reassembly_order_log(1, id, index);
             return -EILSEQ;
+        }
         memset(slot, 0, sizeof(*slot));
     }
     if (slot->active && (slot->id != id || slot->core_id != core ||
         slot->total != total || index != 1 || offset != slot->received)) {
+        reassembly_order_log(2, id, index);
         jumbo_slot_drop(pair, slot);
         slot->id = id;
         slot->active = 2;
@@ -541,6 +610,7 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
 
     if (!index) {
         if (slot->active || offset) {
+            reassembly_order_log(3, id, index);
             jumbo_slot_drop(pair, slot);
             slot->id = id;
             slot->active = 2;
@@ -561,6 +631,7 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
     }
 
     if (!slot->active || (uint32_t)offset + bytes != total) {
+        reassembly_order_log(4, id, index);
         if (slot->active == 1)
             jumbo_slot_drop(pair, slot);
         slot->id = id;

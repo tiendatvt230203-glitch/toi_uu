@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <linux/ethtool.h>
+#include <linux/if_xdp.h>
 #include <linux/if_link.h>
 #include <linux/sockios.h>
 #include "../../../inc/interface/xdp.h"
@@ -159,6 +160,7 @@ static void fq_pressure_log(void)
 }
 
 static atomic_uint_fast64_t g_tx_log_second;
+static atomic_uint_fast64_t g_xdp_stats_log_second;
 
 static void tx_pressure_log(void)
 {
@@ -170,6 +172,33 @@ static void tx_pressure_log(void)
             &g_tx_log_second, &seen, now,
             memory_order_relaxed, memory_order_relaxed))
         fprintf(stderr, "2\n");
+}
+
+static void xdp_stats_log(struct ne_xsk_queue *queue, int dir, int slot)
+{
+    struct xdp_statistics stats = {0};
+    socklen_t length = sizeof(stats);
+    if (getsockopt(xsk_socket__fd(queue->xsk), SOL_XDP, XDP_STATISTICS,
+                   &stats, &length))
+        return;
+    if (!stats.rx_dropped && !stats.rx_invalid_descs &&
+        !stats.tx_invalid_descs && !stats.rx_ring_full &&
+        !stats.rx_fill_ring_empty_descs && !stats.tx_ring_empty_descs)
+        return;
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seen = atomic_load_explicit(&g_xdp_stats_log_second,
+                                         memory_order_relaxed);
+    if (seen != now && atomic_compare_exchange_strong_explicit(
+            &g_xdp_stats_log_second, &seen, now,
+            memory_order_relaxed, memory_order_relaxed))
+        fprintf(stderr, "6:%d:%d:%llu:%llu:%llu:%llu:%llu:%llu\n",
+                dir, slot,
+                (unsigned long long)stats.rx_dropped,
+                (unsigned long long)stats.rx_invalid_descs,
+                (unsigned long long)stats.tx_invalid_descs,
+                (unsigned long long)stats.rx_ring_full,
+                (unsigned long long)stats.rx_fill_ring_empty_descs,
+                (unsigned long long)stats.tx_ring_empty_descs);
 }
 
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out)
@@ -320,6 +349,47 @@ int ne_packet_concat(struct ne_packet *first, struct ne_packet *second)
     first->total_len += second->total_len;
     second->segment_count = 0;
     second->total_len = 0;
+    return 0;
+}
+
+static int ne_packet_compact_for_tx(struct ne_pair *p, struct ne_packet *pkt)
+{
+#if defined(PQC_DIAG_COPY_ALL_TX) && PQC_DIAG_COPY_ALL_TX
+    if (pkt->tx_compacted)
+        return 0;
+    struct ne_packet compact = {
+        .total_len = 0,
+        .wire_ethertype = pkt->wire_ethertype,
+        .dir = pkt->dir,
+        .wan_idx = pkt->wan_idx,
+        .local_idx = pkt->local_idx,
+        .tx_slot = pkt->tx_slot,
+        .tx_compacted = 1
+    };
+    uint32_t offset = 0;
+    while (offset < pkt->total_len) {
+        uint32_t bytes = pkt->total_len - offset;
+        if (bytes > NE_FRAME_DATA_MAX)
+            bytes = NE_FRAME_DATA_MAX;
+        uint8_t *destination;
+        int rc = ne_packet_append_alloc(p, &compact, bytes, &destination);
+        if (rc) {
+            ne_packet_free(p, &compact);
+            return rc;
+        }
+        rc = ne_packet_read(p, pkt, offset, destination, bytes);
+        if (rc) {
+            ne_packet_free(p, &compact);
+            return rc;
+        }
+        offset += bytes;
+    }
+    ne_packet_free(p, pkt);
+    *pkt = compact;
+#else
+    (void)p;
+    (void)pkt;
+#endif
     return 0;
 }
 
@@ -634,6 +704,9 @@ int ne_tx_drain_all(struct ne_pair *p, enum ne_packet_dir dir,
             unsigned needed = 0;
             for (unsigned j = 0; j < group; j++) {
                 struct ne_packet *pkt = &ring->buf[(tail+j) & ring->mask];
+                int compact_rc = ne_packet_compact_for_tx(p, pkt);
+                if (compact_rc)
+                    return compact_rc;
                 needed += pkt->segment_count ? pkt->segment_count : 1;
             }
             uint32_t idx;
@@ -659,5 +732,6 @@ int ne_tx_drain_all(struct ne_pair *p, enum ne_packet_dir dir,
     }
     if (xsk_ring_prod__needs_wakeup(&slot->tx))
         (void)sendto(xsk_socket__fd(slot->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+    xdp_stats_log(slot, dir, tx_slot);
     return sent;
 }
