@@ -9,7 +9,9 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <linux/ethtool.h>
 #include <linux/if_link.h>
+#include <linux/sockios.h>
 #include "../../../inc/interface/xdp.h"
 
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop)
@@ -302,6 +304,44 @@ static int queue_count(const char *ifname)
     return count;
 }
 
+static int interface_set_queue_count(const char *ifname, uint32_t count)
+{
+    struct ethtool_channels current = { .cmd = ETHTOOL_GCHANNELS };
+    struct ethtool_channels requested = {0};
+    struct ifreq ifr = {0};
+    int fd;
+    int rc = 0;
+
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    ifr.ifr_data = (char *)&current;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -errno;
+    if (ioctl(fd, SIOCETHTOOL, &ifr)) {
+        rc = -errno;
+        goto done;
+    }
+    if (current.combined_count == count)
+        goto done;
+    if (!current.max_combined || count > current.max_combined) {
+        rc = -ENOSPC;
+        goto done;
+    }
+
+    requested.cmd = ETHTOOL_SCHANNELS;
+    requested.rx_count = current.rx_count;
+    requested.tx_count = current.tx_count;
+    requested.other_count = current.other_count;
+    requested.combined_count = count;
+    ifr.ifr_data = (char *)&requested;
+    if (ioctl(fd, SIOCETHTOOL, &ifr))
+        rc = -errno;
+
+done:
+    close(fd);
+    return rc;
+}
+
 static int interface_promisc(struct ne_pair *p, int dir, int enable)
 {
     if (!enable && !p->promisc_owned[dir]) return 0;
@@ -334,28 +374,47 @@ int ne_pair_open(struct ne_pair *p, struct app_config *cfg)
 {
     if (!p || !cfg || cfg->local_count != 1 || cfg->wan_count != 1 ||
         !cfg->wans[0].dataplane) return -EINVAL;
+
+    int rc = interface_set_queue_count(cfg->locals[0].ifname, 12u);
+    if (rc)
+        return rc;
+    rc = interface_set_queue_count(cfg->wans[0].ifname, CORE_TX_WORKERS);
+    if (rc) {
+        (void)interface_set_queue_count(cfg->locals[0].ifname, 12u);
+        return rc;
+    }
+
     memset(p, 0, sizeof(*p));
     p->config = cfg;
     p->frame_size = NE_FRAME;
     p->n_frames = NE_N_FRAMES;
     p->bufsize = (size_t)p->frame_size * p->n_frames;
     p->local_count = p->wan_count = 1;
-    int rc = 0;
     for (int dir = 0; dir < 2; dir++) {
         const char *name = dir ? cfg->wans[0].ifname : cfg->locals[0].ifname;
+        uint32_t expected = dir ? CORE_TX_WORKERS : 12u;
         int n = queue_count(name);
-        if (n < (int)CORE_TX_WORKERS || n > MAX_QUEUES) {
-            fprintf(stderr, "[INTERFACE] %s needs at least %u queues (has %d)\n",
-                    name, CORE_TX_WORKERS, n);
-            return -ENOSPC;
+        if (n != (int)expected) {
+            fprintf(stderr, "[INTERFACE] %s needs exactly %u queues (has %d)\n",
+                    name, expected, n);
+            rc = n < 0 ? n : -ENOSPC;
+            goto fail;
         }
         if (dir) cfg->wans[0].queue_count = n;
         else cfg->locals[0].queue_count = n;
     }
     p->pool.buf = calloc(p->n_frames, sizeof(uint64_t));
-    if (!p->pool.buf) return -ENOMEM;
+    if (!p->pool.buf) {
+        rc = -ENOMEM;
+        goto fail;
+    }
     rc = pthread_spin_init(&p->pool.lock, PTHREAD_PROCESS_PRIVATE);
-    if (rc) { free(p->pool.buf); p->pool.buf = NULL; return -rc; }
+    if (rc) {
+        free(p->pool.buf);
+        p->pool.buf = NULL;
+        rc = -rc;
+        goto fail;
+    }
     p->pool.cap = p->n_frames;
     p->pool.mask = p->n_frames - 1;
     p->pool.head = p->n_frames;
@@ -381,8 +440,10 @@ int ne_pair_open(struct ne_pair *p, struct app_config *cfg)
         struct ne_xsk_queue *q = pair_queues(p, dir, &count);
         const char *name = dir ? cfg->wans[0].ifname : cfg->locals[0].ifname;
         for (int i = 0; i < count; i++) {
+            struct xsk_ring_prod *tx = i < (int)CORE_TX_WORKERS
+                ? &q[i].tx : NULL;
             rc = xsk_socket__create_shared(&q[i].xsk, name, i, p->umem,
-                &q[i].rx, &q[i].tx, &q[i].fq, &q[i].cq, &sc);
+                &q[i].rx, tx, &q[i].fq, &q[i].cq, &sc);
             if (rc) goto fail;
         }
         if (dir) p->wan_queue_total = count;
@@ -425,6 +486,10 @@ void ne_pair_close(struct ne_pair *p, const struct app_config *cfg)
     if (p->umem) xsk_umem__delete(p->umem);
     if (p->bufs) munmap(p->bufs, p->bufsize);
     if (p->pool.buf) { pthread_spin_destroy(&p->pool.lock); free(p->pool.buf); }
+    (void)interface_set_queue_count(p->config->locals[0].ifname, 12u);
+    (void)interface_set_queue_count(p->config->wans[0].ifname, 12u);
+    p->config->locals[0].queue_count = queue_count(p->config->locals[0].ifname);
+    p->config->wans[0].queue_count = queue_count(p->config->wans[0].ifname);
     memset(p, 0, sizeof(*p));
 }
 
