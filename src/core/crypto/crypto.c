@@ -184,7 +184,7 @@ int core_l2_pqc_decrypt(struct ne_pair *pair, struct ne_packet *pkt,
     uint32_t ciphertext_len = pkt->total_len - CORE_ETH_HEADER - CORE_META_NO_CORE;
     word32 final = 0;
     uint8_t final_data[16];
-    int rc = -EBADMSG;
+    int rc = -EKEYREJECTED;
     if (scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_GCM, key, 32,
                          meta + 16, 12, SCRYPT_DECRYPTION) ||
         scrypt_CipherSetTagSize(ctx, 16) ||
@@ -402,15 +402,15 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
         return -EBADMSG;
 
     if (!(core & CORE_JUMBO_FLAG))
-        return pkt->total_len >= 64u ? ne_packet_trim_tail(pair, pkt, 1) : -EBADMSG;
+        return pkt->total_len >= 64u ? ne_packet_trim_tail(pair, pkt, 1) : -EMSGSIZE;
 
     if (pkt->total_len < CORE_ETH_HEADER + CORE_JUMBO_HEADER_SIZE)
-        return -EBADMSG;
+        return -EMSGSIZE;
     uint8_t shim[CORE_JUMBO_HEADER_SIZE];
     if (ne_packet_read(pair, pkt, pkt->total_len - sizeof(shim),
                        shim, sizeof(shim)) || memcmp(shim, "JMB\2", 4) ||
         shim[15] != 2 || shim[14] > 1)
-        return -EBADMSG;
+        return -EPROTO;
 
     uint32_t id = jumbo_get32(shim + 4);
     uint16_t total = jumbo_get16(shim + 8);
@@ -419,14 +419,14 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
     uint8_t index = shim[14];
     core &= CORE_JUMBO_CORE_MASK;
     if (!bytes || (uint32_t)offset + bytes > total)
-        return -EBADMSG;
+        return -EMSGSIZE;
     uint32_t minimum_len = CORE_ETH_HEADER + bytes + CORE_JUMBO_HEADER_SIZE;
     if (pkt->total_len < minimum_len ||
         (index && pkt->total_len != minimum_len))
-        return -EBADMSG;
+        return -EMSGSIZE;
     uint32_t padding = pkt->total_len - minimum_len;
     if (padding > CORE_JUMBO_DATA_MAX - bytes)
-        return -EBADMSG;
+        return -EMSGSIZE;
 
     if (!g_jumbo_slots) {
         g_jumbo_slots = calloc(CORE_JUMBO_SLOTS, sizeof(*g_jumbo_slots));
@@ -437,7 +437,7 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
     struct core_fragment_slot *slot = &g_jumbo_slots[id % CORE_JUMBO_SLOTS];
     if (slot->active == 2) {
         if (slot->id == id)
-            return -EBADMSG;
+            return -EILSEQ;
         memset(slot, 0, sizeof(*slot));
     }
     if (slot->active && (slot->id != id || slot->core_id != core ||
@@ -445,7 +445,7 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
         jumbo_slot_drop(pair, slot);
         slot->id = id;
         slot->active = 2;
-        return -EBADMSG;
+        return -EILSEQ;
     }
 
     if (!index) {
@@ -453,12 +453,12 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
             jumbo_slot_drop(pair, slot);
             slot->id = id;
             slot->active = 2;
-            return -EBADMSG;
+            return -EILSEQ;
         }
         if (ne_packet_trim_tail(pair, pkt, CORE_JUMBO_HEADER_SIZE))
-            return -EBADMSG;
+            return -EMSGSIZE;
         if (padding && ne_packet_trim_tail(pair, pkt, padding))
-            return -EBADMSG;
+            return -EMSGSIZE;
         slot->id = id;
         slot->total = total;
         slot->received = bytes;
@@ -474,12 +474,12 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
             jumbo_slot_drop(pair, slot);
         slot->id = id;
         slot->active = 2;
-        return -EBADMSG;
+        return -EILSEQ;
     }
     if (ne_packet_trim_tail(pair, pkt, CORE_JUMBO_HEADER_SIZE) ||
         ne_packet_trim_head(pair, pkt, CORE_ETH_HEADER)) {
         jumbo_slot_drop(pair, slot);
-        return -EBADMSG;
+        return -EMSGSIZE;
     }
     if (ne_packet_concat(&slot->packet, pkt)) {
         jumbo_slot_drop(pair, slot);
@@ -487,5 +487,5 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
     }
     *pkt = slot->packet;
     memset(slot, 0, sizeof(*slot));
-    return pkt->total_len == CORE_ETH_HEADER + total ? 0 : -EBADMSG;
+    return pkt->total_len == CORE_ETH_HEADER + total ? 0 : -EMSGSIZE;
 }
