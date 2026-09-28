@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -48,6 +49,28 @@ static uint32_t jumbo_get32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8) | p[3];
+}
+
+static uint64_t packet_fingerprint(struct ne_pair *pair,
+                                   const struct ne_packet *pkt,
+                                   uint32_t bytes)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    uint32_t offset = 0;
+    while (bytes) {
+        uint32_t available;
+        uint8_t *data = ne_packet_at(pair, pkt, offset, &available);
+        if (!data)
+            return 0;
+        uint32_t take = available < bytes ? available : bytes;
+        for (uint32_t i = 0; i < take; i++) {
+            hash ^= data[i];
+            hash *= 1099511628211ULL;
+        }
+        offset += take;
+        bytes -= take;
+    }
+    return hash;
 }
 
 static void jumbo_make(uint8_t shim[CORE_JUMBO_HEADER_SIZE], uint32_t id,
@@ -321,6 +344,11 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     uint32_t id = atomic_fetch_add_explicit(&g_jumbo_id, 1,
                                              memory_order_relaxed);
     uint16_t total = (uint16_t)(logical_len - 15u);
+    if (!(id & 1023u))
+        fprintf(stderr, "5T:%u:%016llx:%u\n", id,
+                (unsigned long long)packet_fingerprint(pair, pkt,
+                                                       logical_len - 1u),
+                logical_len - 1u);
     uint16_t first_bytes = (uint16_t)(prefix_len - CORE_ETH_HEADER);
     uint16_t first_padding = (uint16_t)(CORE_JUMBO_DATA_MAX - first_bytes);
     uint8_t *shim0 = ne_packet_data(pair, shim_addr);
@@ -485,6 +513,11 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
         jumbo_slot_drop(pair, slot);
         return -EMSGSIZE;
     }
+    if (!(id & 1023u))
+        fprintf(stderr, "5R:%u:%016llx:%u\n", id,
+                (unsigned long long)packet_fingerprint(pair, &slot->packet,
+                                                       slot->packet.total_len),
+                slot->packet.total_len);
     *pkt = slot->packet;
     memset(slot, 0, sizeof(*slot));
     return pkt->total_len == CORE_ETH_HEADER + total ? 0 : -EMSGSIZE;
