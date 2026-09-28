@@ -159,6 +159,9 @@ int main(int argc, char **argv)
 #if defined(PQC_UNSAFE_SKIP_GCM_AUTH) && PQC_UNSAFE_SKIP_GCM_AUTH
     fprintf(stderr, "[PQC-TEST] GCM authentication disabled on receive\n");
 #endif
+#if defined(PQC_DIAG_COPY_RX_TX) && PQC_DIAG_COPY_RX_TX
+    fprintf(stderr, "[PQC-DIAG] RX payload copied before cross-interface TX\n");
+#endif
 
     rc = daemon_run(&runtime);
 

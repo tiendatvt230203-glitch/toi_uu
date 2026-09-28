@@ -106,6 +106,27 @@ static int cipher_update_packet(SCryptCipherCtx *ctx, struct ne_pair *pair,
     return 0;
 }
 
+static int packet_copy_range(struct ne_pair *pair,
+                             const struct ne_packet *source,
+                             uint32_t offset, uint32_t bytes,
+                             struct ne_packet *destination)
+{
+    while (bytes) {
+        uint32_t take = bytes > NE_FRAME_DATA_MAX
+            ? NE_FRAME_DATA_MAX : bytes;
+        uint8_t *data;
+        int rc = ne_packet_append_alloc(pair, destination, take, &data);
+        if (rc)
+            return rc;
+        rc = ne_packet_read(pair, source, offset, data, take);
+        if (rc)
+            return rc;
+        offset += take;
+        bytes -= take;
+    }
+    return 0;
+}
+
 int core_l2_pqc_encrypt(struct ne_pair *pair, struct ne_packet *pkt,
                         uint16_t type, uint8_t policy, uint8_t core,
                         const uint8_t key[32])
@@ -291,8 +312,25 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     second->segment_len[second->segment_count++] = CORE_ETH_HEADER;
     second->total_len = CORE_ETH_HEADER;
 
-    uint32_t position = 0;
     uint64_t boundary_addr = 0;
+#if defined(PQC_DIAG_COPY_RX_TX) && PQC_DIAG_COPY_RX_TX
+    rc = packet_copy_range(pair, pkt, 0, prefix_len, first);
+    if (!rc && original_len > prefix_len)
+        rc = packet_copy_range(pair, pkt, prefix_len,
+                               original_len - prefix_len, second);
+    if (rc) {
+        ne_packet_free(pair, first);
+        ne_packet_free(pair, second);
+        ne_frame_free(pair, shim_addr);
+        memset(first, 0, sizeof(*first));
+        memset(second, 0, sizeof(*second));
+        return rc;
+    }
+    for (unsigned i = 0; i < original_segments; i++)
+        ne_frame_free(pair, pkt->segment_addr[i]);
+    uint32_t position = original_len;
+#else
+    uint32_t position = 0;
     for (unsigned i = 0; i < original_segments; i++) {
         uint32_t length = pkt->segment_len[i];
         uint32_t end = position + length;
@@ -339,6 +377,7 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
         }
         position = end;
     }
+#endif
     if (position != original_len || first->total_len != prefix_len ||
         first->segment_count >= NE_PACKET_MAX_SEGMENTS ||
         second->segment_count >= NE_PACKET_MAX_SEGMENTS) {
