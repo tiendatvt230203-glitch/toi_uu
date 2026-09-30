@@ -141,27 +141,6 @@ static int cipher_update_packet(SCryptCipherCtx *ctx, struct ne_pair *pair,
     return 0;
 }
 
-static int packet_copy_range(struct ne_pair *pair,
-                             const struct ne_packet *source,
-                             uint32_t offset, uint32_t bytes,
-                             struct ne_packet *destination)
-{
-    while (bytes) {
-        uint32_t take = bytes > NE_FRAME_DATA_MAX
-            ? NE_FRAME_DATA_MAX : bytes;
-        uint8_t *data;
-        int rc = ne_packet_append_alloc(pair, destination, take, &data);
-        if (rc)
-            return rc;
-        rc = ne_packet_read(pair, source, offset, data, take);
-        if (rc)
-            return rc;
-        offset += take;
-        bytes -= take;
-    }
-    return 0;
-}
-
 int core_l2_pqc_encrypt(struct ne_pair *pair, struct ne_packet *pkt,
                         uint16_t type, uint8_t policy, uint8_t core,
                         const uint8_t key[32])
@@ -186,14 +165,7 @@ int core_l2_pqc_encrypt(struct ne_pair *pair, struct ne_packet *pkt,
     if (rc)
         return rc;
 
-#if defined(PQC_UNSAFE_FIXED_NONCE) && PQC_UNSAFE_FIXED_NONCE
     memset(meta + 16, 0, 12);
-#else
-    if (scrypt_RandomBytes(meta + 16, 12)) {
-        ne_packet_trim_tail(pair, pkt, CORE_META_WITH_CORE);
-        return -EIO;
-    }
-#endif
 
     ethernet[12] = (uint8_t)(type >> 8);
     ethernet[13] = (uint8_t)type;
@@ -319,9 +291,15 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     uint32_t logical_len = pkt->total_len;
     uint32_t original_len = logical_len - CORE_META_WITH_CORE;
     unsigned original_segments = pkt->segment_count - 1u;
-    uint32_t prefix_len = CORE_ETH_HEADER + CORE_JUMBO_DATA_MAX;
-    if (prefix_len > original_len)
-        prefix_len = original_len;
+    uint32_t prefix_limit = CORE_ETH_HEADER + CORE_JUMBO_DATA_MAX;
+    uint32_t prefix_len = 0;
+    uint32_t segment_end = 0;
+    for (unsigned i = 0; i < original_segments; i++) {
+        segment_end += pkt->segment_len[i];
+        if (segment_end > prefix_limit)
+            break;
+        prefix_len = segment_end;
+    }
     if (prefix_len <= CORE_ETH_HEADER ||
         logical_len - 15u > UINT16_MAX)
         return -EMSGSIZE;
@@ -347,79 +325,30 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     second->segment_len[second->segment_count++] = CORE_ETH_HEADER;
     second->total_len = CORE_ETH_HEADER;
 
-    uint64_t boundary_addr = 0;
-#if defined(PQC_DIAG_COPY_RX_TX) && PQC_DIAG_COPY_RX_TX
-    rc = packet_copy_range(pair, pkt, 0, prefix_len, first);
-    if (!rc && original_len > prefix_len)
-        rc = packet_copy_range(pair, pkt, prefix_len,
-                               original_len - prefix_len, second);
-    if (rc) {
-        ne_packet_free(pair, first);
-        ne_packet_free(pair, second);
-        ne_frame_free(pair, shim_addr);
-        memset(first, 0, sizeof(*first));
-        memset(second, 0, sizeof(*second));
-        return rc;
-    }
-    for (unsigned i = 0; i < original_segments; i++)
-        ne_frame_free(pair, pkt->segment_addr[i]);
-    uint32_t position = original_len;
-#else
     uint32_t position = 0;
     for (unsigned i = 0; i < original_segments; i++) {
         uint32_t length = pkt->segment_len[i];
         uint32_t end = position + length;
+        struct ne_packet *target = end <= prefix_len ? first : second;
 
-        if (end <= prefix_len) {
-            first->segment_addr[first->segment_count] = pkt->segment_addr[i];
-            first->segment_len[first->segment_count++] = length;
-            first->total_len += length;
-        } else if (position >= prefix_len) {
-            second->segment_addr[second->segment_count] = pkt->segment_addr[i];
-            second->segment_len[second->segment_count++] = length;
-            second->total_len += length;
-        } else {
-            uint32_t left = prefix_len - position;
-            uint32_t right = length - left;
-            if (first->segment_count >= NE_PACKET_MAX_SEGMENTS - 1u ||
-                second->segment_count >= NE_PACKET_MAX_SEGMENTS - 1u ||
-                right > NE_FRAME_DATA_MAX ||
-                ne_frame_alloc(pair, &boundary_addr)) {
-                ne_frame_free(pair, header_addr);
-                ne_frame_free(pair, shim_addr);
-                memset(first, 0, sizeof(*first));
-                memset(second, 0, sizeof(*second));
-                return -EMSGSIZE;
-            }
-            first->segment_addr[first->segment_count] = pkt->segment_addr[i];
-            first->segment_len[first->segment_count++] = left;
-            first->total_len += left;
-            uint8_t *source = ne_packet_data(pair, pkt->segment_addr[i]);
-            uint8_t *boundary = ne_packet_data(pair, boundary_addr);
-            if (!source || !boundary) {
-                ne_frame_free(pair, boundary_addr);
-                boundary_addr = 0;
-                ne_frame_free(pair, header_addr);
-                ne_frame_free(pair, shim_addr);
-                memset(first, 0, sizeof(*first));
-                memset(second, 0, sizeof(*second));
-                return -EFAULT;
-            }
-            memcpy(boundary, source + left, right);
-            second->segment_addr[second->segment_count] = boundary_addr;
-            second->segment_len[second->segment_count++] = right;
-            second->total_len += right;
+        if ((position < prefix_len && end > prefix_len) ||
+            target->segment_count >= NE_PACKET_MAX_SEGMENTS - 1u) {
+            ne_frame_free(pair, header_addr);
+            ne_frame_free(pair, shim_addr);
+            memset(first, 0, sizeof(*first));
+            memset(second, 0, sizeof(*second));
+            return -EMSGSIZE;
         }
+        target->segment_addr[target->segment_count] = pkt->segment_addr[i];
+        target->segment_len[target->segment_count++] = length;
+        target->total_len += length;
         position = end;
     }
-#endif
     if (position != original_len || first->total_len != prefix_len ||
         first->segment_count >= NE_PACKET_MAX_SEGMENTS ||
         second->segment_count >= NE_PACKET_MAX_SEGMENTS) {
         ne_frame_free(pair, header_addr);
         ne_frame_free(pair, shim_addr);
-        if (boundary_addr)
-            ne_frame_free(pair, boundary_addr);
         memset(first, 0, sizeof(*first));
         memset(second, 0, sizeof(*second));
         return -EMSGSIZE;
@@ -456,31 +385,16 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
                                                        CORE_META_NO_CORE));
     }
     uint16_t first_padding = (uint16_t)(CORE_JUMBO_DATA_MAX - first_bytes);
-#if defined(PQC_DIAG_COPY_RX_TX) && PQC_DIAG_COPY_RX_TX
-    unsigned first_tail = first->segment_count - 1u;
-    uint8_t *shim0 = ne_packet_data(
-        pair, first->segment_addr[first_tail] + first->segment_len[first_tail]);
-    if (!shim0 || first->segment_len[first_tail] + first_padding +
-        CORE_JUMBO_HEADER_SIZE > NE_FRAME_DATA_MAX) {
-        ne_packet_free(pair, first);
-        ne_packet_free(pair, second);
+    if ((uint32_t)first_padding + CORE_JUMBO_HEADER_SIZE > NE_FRAME_DATA_MAX) {
+        ne_frame_free(pair, header_addr);
         ne_frame_free(pair, shim_addr);
         memset(first, 0, sizeof(*first));
         memset(second, 0, sizeof(*second));
-        memset(pkt, 0, sizeof(*pkt));
         return -EMSGSIZE;
     }
-    memset(shim0, 0, first_padding);
-    jumbo_make(shim0 + first_padding, id, total, 0, first_bytes, 0, core);
-    first->segment_len[first_tail] += first_padding + CORE_JUMBO_HEADER_SIZE;
-    first->total_len += first_padding + CORE_JUMBO_HEADER_SIZE;
-    ne_frame_free(pair, shim_addr);
-    shim_addr = 0;
-#else
     uint8_t *shim0 = ne_packet_data(pair, shim_addr);
     memset(shim0, 0, first_padding);
     jumbo_make(shim0 + first_padding, id, total, 0, first_bytes, 0, core);
-#endif
 
     uint8_t *tail = ne_packet_data(pair,
         pkt->segment_addr[pkt->segment_count - 1u]);
@@ -489,11 +403,9 @@ int core_l2_pqc_fragment(struct ne_pair *pair, struct ne_packet *pkt,
     pkt->segment_len[pkt->segment_count - 1u] =
         CORE_META_NO_CORE + CORE_JUMBO_HEADER_SIZE;
 
-#if !defined(PQC_DIAG_COPY_RX_TX) || !PQC_DIAG_COPY_RX_TX
     first->segment_addr[first->segment_count] = shim_addr;
     first->segment_len[first->segment_count++] = first_padding + CORE_JUMBO_HEADER_SIZE;
     first->total_len += first_padding + CORE_JUMBO_HEADER_SIZE;
-#endif
 
     unsigned meta = pkt->segment_count - 1u;
     second->segment_addr[second->segment_count] = pkt->segment_addr[meta];
@@ -592,30 +504,12 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
     }
 
     struct core_fragment_slot *slot = &g_jumbo_slots[id % CORE_JUMBO_SLOTS];
-    if (slot->active == 2) {
-        if (slot->id == id) {
-            reassembly_order_log(1, id, index);
-            return -EILSEQ;
-        }
-        memset(slot, 0, sizeof(*slot));
-    }
-    if (slot->active && (slot->id != id || slot->core_id != core ||
-        slot->total != total || index != 1 || offset != slot->received)) {
-        reassembly_order_log(2, id, index);
-        jumbo_slot_drop(pair, slot);
-        slot->id = id;
-        slot->active = 2;
-        return -EILSEQ;
-    }
-
     if (!index) {
-        if (slot->active || offset) {
+        if (offset) {
             reassembly_order_log(3, id, index);
-            jumbo_slot_drop(pair, slot);
-            slot->id = id;
-            slot->active = 2;
             return -EILSEQ;
         }
+        jumbo_slot_drop(pair, slot);
         if (ne_packet_trim_tail(pair, pkt, CORE_JUMBO_HEADER_SIZE))
             return -EMSGSIZE;
         if (padding && ne_packet_trim_tail(pair, pkt, padding))
@@ -630,12 +524,12 @@ int core_l2_pqc_reassemble(struct ne_pair *pair, struct ne_packet *pkt,
         return 1;
     }
 
-    if (!slot->active || (uint32_t)offset + bytes != total) {
+    if (slot->active != 1 || slot->id != id || slot->core_id != core ||
+        slot->total != total || offset != slot->received ||
+        (uint32_t)offset + bytes != total) {
         reassembly_order_log(4, id, index);
-        if (slot->active == 1)
+        if (slot->active == 1 && slot->id == id)
             jumbo_slot_drop(pair, slot);
-        slot->id = id;
-        slot->active = 2;
         return -EILSEQ;
     }
     if (ne_packet_trim_tail(pair, pkt, CORE_JUMBO_HEADER_SIZE) ||

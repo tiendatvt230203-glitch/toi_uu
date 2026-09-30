@@ -156,16 +156,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-#if defined(PQC_UNSAFE_SKIP_GCM_AUTH) && PQC_UNSAFE_SKIP_GCM_AUTH
-    fprintf(stderr, "[PQC-TEST] GCM authentication disabled on receive\n");
-#endif
-#if defined(PQC_DIAG_COPY_RX_TX) && PQC_DIAG_COPY_RX_TX
-    fprintf(stderr, "[PQC-DIAG] RX payload copied before cross-interface TX\n");
-#endif
-#if defined(PQC_DIAG_COPY_ALL_TX) && PQC_DIAG_COPY_ALL_TX
-    fprintf(stderr, "[PQC-DIAG] all TX packets compacted into fresh UMEM frames\n");
-#endif
-
     rc = daemon_run(&runtime);
 
     daemon_cleanup(&runtime);

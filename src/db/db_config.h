@@ -12,8 +12,4 @@ int config_validate(struct app_config *cfg);
 int parse_ip_cidr_pub(const char *str, uint32_t *ip,
                       uint32_t *netmask, uint32_t *network);
 
-struct pqc_policy_input;
-int db_config_load_pqc_policy(void *pg_conn, int policy_id, int profile_id,
-                              struct pqc_policy_input *out);
-
 #endif

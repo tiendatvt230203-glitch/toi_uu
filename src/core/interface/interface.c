@@ -352,48 +352,6 @@ int ne_packet_concat(struct ne_packet *first, struct ne_packet *second)
     return 0;
 }
 
-static int ne_packet_compact_for_tx(struct ne_pair *p, struct ne_packet *pkt)
-{
-#if defined(PQC_DIAG_COPY_ALL_TX) && PQC_DIAG_COPY_ALL_TX
-    if (pkt->tx_compacted)
-        return 0;
-    struct ne_packet compact = {
-        .total_len = 0,
-        .wire_ethertype = pkt->wire_ethertype,
-        .dir = pkt->dir,
-        .wan_idx = pkt->wan_idx,
-        .local_idx = pkt->local_idx,
-        .tx_slot = pkt->tx_slot,
-        .tx_compacted = 1
-    };
-    uint32_t offset = 0;
-    while (offset < pkt->total_len) {
-        uint32_t bytes = pkt->total_len - offset;
-        if (bytes > NE_FRAME_DATA_MAX)
-            bytes = NE_FRAME_DATA_MAX;
-        uint8_t *destination;
-        int rc = ne_packet_append_alloc(p, &compact, bytes, &destination);
-        if (rc) {
-            ne_packet_free(p, &compact);
-            return rc;
-        }
-        rc = ne_packet_read(p, pkt, offset, destination, bytes);
-        if (rc) {
-            ne_packet_free(p, &compact);
-            return rc;
-        }
-        offset += bytes;
-    }
-    ne_packet_free(p, pkt);
-    *pkt = compact;
-#else
-    (void)p;
-    (void)pkt;
-#endif
-    return 0;
-}
-
-
 static int queue_count(const char *ifname)
 {
     char path[128];
@@ -704,9 +662,6 @@ int ne_tx_drain_all(struct ne_pair *p, enum ne_packet_dir dir,
             unsigned needed = 0;
             for (unsigned j = 0; j < group; j++) {
                 struct ne_packet *pkt = &ring->buf[(tail+j) & ring->mask];
-                int compact_rc = ne_packet_compact_for_tx(p, pkt);
-                if (compact_rc)
-                    return compact_rc;
                 needed += pkt->segment_count ? pkt->segment_count : 1;
             }
             uint32_t idx;

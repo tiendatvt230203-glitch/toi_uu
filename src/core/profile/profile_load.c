@@ -2,7 +2,6 @@
 #include "../../../inc/profile/profile_edit.h"
 #include "../../../inc/runtime/worker.h"
 #include "../../../inc/interface/interface.h"
-#include "../../../inc/crypto/key_manager.h"
 
 #include "../../../src/db/db_runtime.h"
 #include "../../../src/db/db_config.h"
@@ -117,7 +116,6 @@ void core_profile_unload(struct core_runtime *runtime)
 {
     core_worker_stop_all(runtime);
     ne_pair_close(&runtime->pair, &runtime->config);
-    for (int id = 1; id < 256; id++) core_key_remove(id);
     memset(&runtime->config, 0, sizeof(runtime->config));
     memset(runtime->workers, 0, sizeof(runtime->workers));
     fprintf(stderr, "[PROFILE] dataplane cleared; daemon listening\n");

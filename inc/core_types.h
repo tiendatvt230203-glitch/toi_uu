@@ -18,7 +18,6 @@
 
 #define MAX_QUEUES                    64
 #define MAX_CRYPTO_POLICIES           128
-#define PQC_PEER_PUB_MAX              8192
 #define MAC_LEN                       6
 #define POLICY_PROTO_ANY              0
 #define POLICY_PROTO_TCP_UDP          254
@@ -216,14 +215,6 @@ struct bridge_config {
     int wan_slot;
 };
 
-struct pqc_profile_config {
-    char local_identity_fingerprint[16];
-    char peer_fingerprint[16];
-    int is_initiator;
-    int has_pqc_identity;
-    char peer_public_key[PQC_PEER_PUB_MAX];
-};
-
 struct ne_xsk_queue {
     struct xsk_socket *xsk;
     struct xsk_ring_cons rx;
@@ -265,7 +256,6 @@ struct app_config {
     int wan_count;
     struct bridge_config bridges[1];
     int bridge_count;
-    struct pqc_profile_config pqc;
     char bpf_lan_file[256];
     char bpf_wan_file[256];
     int crypto_enabled;
@@ -283,7 +273,6 @@ struct ne_packet {
     uint8_t wan_idx;
     uint8_t local_idx;
     uint8_t tx_slot;
-    uint8_t tx_compacted;
 };
 
 struct core_packet_batch {

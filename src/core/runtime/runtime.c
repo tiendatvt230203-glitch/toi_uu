@@ -2,7 +2,6 @@
 #include "../../../inc/runtime/worker.h"
 #include "../../../inc/interface/interface.h"
 #include "../../../inc/profile/profile_load.h"
-#include "../../../inc/crypto/key_manager.h"
 #include "db_env.h"
 
 #include <errno.h>
@@ -123,7 +122,6 @@ void core_runtime_cleanup(struct core_runtime *runtime)
     core_runtime_stop(runtime);
     core_worker_stop_all(runtime);
     ne_pair_close(&runtime->pair, &runtime->config);
-    for (int id = 1; id < 256; id++) core_key_remove(id);
     pthread_rwlock_destroy(&runtime->config_lock);
     memset(runtime, 0, sizeof(*runtime));
 }
